@@ -1,0 +1,102 @@
+name: iOS 14 test IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios14-test-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      IPHONEOS_DEPLOYMENT_TARGET: '14.0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+      - name: 固定 Xcode 与 Flutter
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          git clone --depth 1 --branch 3.44.0 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          test "$(git -C "$RUNNER_TEMP/flutter" rev-parse HEAD)" = 559ffa3f75e7402d65a8def9c28389a9b2e6fe42
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/flutter/bin/flutter" --version
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core/doh_proxy
+          key: ios14-xcode16.4
+      - name: 项目准备及工具信息
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          dart tool/project_prep.dart app
+          { git rev-parse HEAD; git submodule status; flutter --version; dart --version; rustc --version; xcodebuild -version; } > dist/build-info.txt 2>&1
+      - name: 格式与静态分析
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --name-only --diff-filter=ACMR e1bd839ef87825347c062fb588751a1a62e02372 HEAD -- '*.dart' > "$RUNNER_TEMP/changed-dart.txt"
+          test -s "$RUNNER_TEMP/changed-dart.txt"
+          xargs dart format --output=none --set-exit-if-changed < "$RUNNER_TEMP/changed-dart.txt"
+          while IFS= read -r file; do dart analyze --fatal-infos "$file"; done < "$RUNNER_TEMP/changed-dart.txt"
+          python3 scripts/ci/test_inspect_ios14_ipa.py
+      - name: iOS14 兼容与 CF 回归测试
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter test --no-pub \
+            test/services/network/adapters/platform_adapter_test.dart \
+            test/services/network/adapters/apple_transport_policy_test.dart \
+            test/services/network/doh_route_diagnostics_test.dart \
+            test/services/screen_track_timing_test.dart \
+            test/services/diagnostics/ios14_diagnostics_test.dart \
+            test/pages/ios14_diagnostics_page_test.dart \
+            test/services/cf_challenge_guards_test.dart \
+            test/services/cf_clearance_authority_test.dart \
+            test/services/cf_disable_auto_verify_test.dart \
+            test/services/cf_failure_count_round_test.dart
+      - name: 构建未签名 IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          dart tool/flutterw.dart build ios --release --no-codesign --build-number="$(date -u +%Y%m%d%H)"
+          nm -gU build/ios/iphoneos/Runner.app/Runner > "$RUNNER_TEMP/runner-symbols.txt"
+          grep '_doh_proxy_start_with_config_json' "$RUNNER_TEMP/runner-symbols.txt"
+          mkdir -p "$RUNNER_TEMP/ios14-package/Payload"
+          cp -R build/ios/iphoneos/Runner.app "$RUNNER_TEMP/ios14-package/Payload/"
+          (cd "$RUNNER_TEMP/ios14-package" && zip -qry "$GITHUB_WORKSPACE/dist/fluxdo-ios14-test-unsigned.ipa" Payload)
+          python3 scripts/ci/inspect_ios14_ipa.py dist/fluxdo-ios14-test-unsigned.ipa --output dist/ipa-inspection.json
+          (cd dist && shasum -a 256 fluxdo-ios14-test-unsigned.ipa > SHA256SUMS.txt)
+          cp docs/ios14-validation.md dist/
+      - name: 上传已检查的测试包
+        uses: actions/upload-artifact@v4
+        with:
+          name: fluxdo-ios14-test-${{ github.run_number }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+      - name: 失败时保留非敏感静态检查结果
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios14-build-diagnostics-${{ github.run_number }}
+          path: |
+            dist/build-info.txt
+            dist/ipa-inspection.json
+          if-no-files-found: ignore
+          retention-days: 7
