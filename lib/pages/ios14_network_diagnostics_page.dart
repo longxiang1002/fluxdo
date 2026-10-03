@@ -1,0 +1,180 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import '../services/network/adapters/apple_transport_policy.dart';
+import '../services/network/adapters/platform_adapter.dart';
+import '../services/network/doh/doh_route_diagnostics.dart';
+import '../services/network/doh/network_settings_service.dart';
+
+/// 测试包专用入口：所有显示内容均为能力/路由元数据，无账户内容。
+class Ios14NetworkDiagnosticsPage extends StatefulWidget {
+  const Ios14NetworkDiagnosticsPage({super.key});
+
+  @override
+  State<Ios14NetworkDiagnosticsPage> createState() =>
+      _Ios14NetworkDiagnosticsPageState();
+}
+
+class _Ios14NetworkDiagnosticsPageState
+    extends State<Ios14NetworkDiagnosticsPage> {
+  final _settings = NetworkSettingsService.instance;
+  final _routes = DohRouteDiagnostics.instance;
+  bool _testing = false;
+  String _dnsResult = '尚未测试';
+  int? _testedVersion;
+
+  @override
+  void initState() {
+    super.initState();
+    _settings.notifier.addListener(_changed);
+  }
+
+  void _changed() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _settings.notifier.removeListener(_changed);
+    super.dispose();
+  }
+
+  Future<void> _testDns() async {
+    final config = _settings.current;
+    final version = _settings.version;
+    setState(() {
+      _testing = true;
+      _dnsResult = '测试中';
+    });
+    try {
+      // 直接调用生产使用的 Rust DoH 解析，不把系统 DNS 兜底当成功。
+      final result = await _settings.proxyService
+          .lookupHost(
+            'linux.do',
+            config.selectedServerUrl,
+            preferIpv6: config.preferIPv6,
+            forceRefresh: true,
+          )
+          .timeout(const Duration(seconds: 20));
+      if (!mounted) return;
+      setState(() {
+        _testedVersion = version;
+        _dnsResult = result != null && result.ips.isNotEmpty
+            ? 'Rust DoH 查询成功（${result.ips.length} 个地址）；仅证明解析，不代表 WebView 已接管'
+            : '解析未返回地址；不能认定 DoH 生效';
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _testedVersion = version;
+        _dnsResult = 'DoH 查询失败或超时；未使用系统 DNS 结果冒充成功';
+      });
+    } finally {
+      if (mounted) setState(() => _testing = false);
+    }
+  }
+
+  Map<String, Object?> _report() => {
+    'schema': 1,
+    'iosMajor': Platform.isIOS
+        ? appleSystemMajorVersion(Platform.operatingSystemVersion)
+        : null,
+    'settingsVersion': _settings.version,
+    'dohConfigured': _settings.current.dohEnabled,
+    'gatewayRunning': _settings.isGatewayMode,
+    'proxyStartFailed': _settings.lastStartFailed,
+    'webViewProxyApplied': _settings.webViewProxyApplied,
+    'iosIoFallback': usesIosIoTransport,
+    'dnsTestVersion': _testedVersion,
+    'dnsTestResult': _dnsResult,
+    'routes': _routes.snapshot(),
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final version = _settings.version;
+    final oldTest = _testedVersion != null && _testedVersion != version;
+    final iosMajor = appleSystemMajorVersion(Platform.operatingSystemVersion);
+    final webViewUnsupported =
+        Platform.isIOS && (iosMajor == null || iosMajor < 17);
+    return Scaffold(
+      appBar: AppBar(title: const Text('iOS 14 网络验证')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Text(
+            '实际基础引擎：${getAdapterDisplayName(resolveEffectiveAdapter().type)}',
+          ),
+          Text('DoH 开关：${_settings.current.dohEnabled ? "开启" : "关闭"}'),
+          Text('本地 DoH 网关：${_settings.isGatewayMode ? "运行中" : "未运行"}'),
+          Text('代理启动失败：${_settings.lastStartFailed ? "是" : "否"}'),
+          Text(
+            'WebView 代理实际设置：${_settings.webViewProxyApplied ? "已应用" : "未应用"}',
+          ),
+          if (webViewUnsupported)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 12),
+              child: Text(
+                'iOS 17 以下无法通过现有接口把 WebView 接入应用 DoH。登录、CF 和兼容模式可能使用系统网络。应用 DoH 开关不代表全应用覆盖。',
+              ),
+            ),
+          const Text(
+            '标准模式在 iOS 14 使用 IO；系统 VPN 与 HTTP 代理不是一回事。此页面不会切换你的 DNS、VPN 或账户。',
+          ),
+          const SizedBox(height: 12),
+          FilledButton(
+            onPressed: _testing || !_settings.current.dohEnabled
+                ? null
+                : _testDns,
+            child: const Text('测试当前 DoH（linux.do）'),
+          ),
+          Text(oldTest ? '配置已变化，以下测试仅供历史参考：$_dnsResult' : _dnsResult),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('采集实际请求路由'),
+            subtitle: const Text('默认关闭，最多60条，仅内存。启用后返回刷帖，再来刷新查看。'),
+            value: _routes.enabled,
+            onChanged: (value) => setState(() => _routes.setEnabled(value)),
+          ),
+          const Text(
+            'gateway 表示请求实际交给本地网关；HTTP 状态仅为响应头结果。direct-or-rhttp 不等于已验证 DoH；webview 不等于已接入应用 DoH。配置代号不同的记录仅作历史参考。',
+          ),
+          Wrap(
+            spacing: 8,
+            children: [
+              OutlinedButton(
+                onPressed: () => setState(() {}),
+                child: const Text('刷新记录'),
+              ),
+              OutlinedButton(
+                onPressed: () => setState(_routes.reset),
+                child: const Text('清空记录'),
+              ),
+              OutlinedButton(
+                onPressed: () async {
+                  await Clipboard.setData(
+                    ClipboardData(
+                      text: const JsonEncoder.withIndent(
+                        '  ',
+                      ).convert(_report()),
+                    ),
+                  );
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(
+                      context,
+                    ).showSnackBar(const SnackBar(content: Text('已复制脱敏网络报告')));
+                  }
+                },
+                child: const Text('复制脱敏报告'),
+              ),
+            ],
+          ),
+          SelectableText(const JsonEncoder.withIndent('  ').convert(_report())),
+        ],
+      ),
+    );
+  }
+}

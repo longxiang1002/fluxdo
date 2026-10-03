@@ -17,6 +17,14 @@ import 'network_http_adapter.dart';
 import '../../../l10n/s.dart';
 import 'rhttp_adapter.dart';
 import 'webview_http_adapter.dart';
+import 'apple_transport_policy.dart';
+import '../doh/doh_route_diagnostics.dart';
+import '../../diagnostics/ios14_diagnostics.dart';
+
+final bool usesIosIoTransport = needsIosIoFallback(
+  isIOS: Platform.isIOS,
+  systemVersion: Platform.operatingSystemVersion,
+);
 
 /// 当前使用的适配器类型
 enum AdapterType {
@@ -67,6 +75,7 @@ String getAdapterDisplayName(AdapterType type) {
     case AdapterType.webview:
       return S.current.network_adapterWebView;
     case AdapterType.native:
+      if (usesIosIoTransport) return 'Dio IO (iOS <15)';
       if (Platform.isAndroid) {
         return S.current.network_adapterNativeAndroid;
       }
@@ -266,9 +275,16 @@ HttpClientAdapter _createNativeAdapter() {
   if (Platform.isIOS || Platform.isMacOS) {
     // Release 模式: URLSession 默认会自动管理 Cookie（httpShouldSetCookies=true），
     // 会与 AppCookieManager 拦截器冲突。禁用 URLSession 的 Cookie 自动管理。
-    final config = URLSessionConfiguration.ephemeralSessionConfiguration();
-    config.httpShouldSetCookies = false;
-    return NativeAdapter(createCupertinoConfiguration: () => config);
+    return createIosCompatibleTransport<HttpClientAdapter>(
+      isIOS: Platform.isIOS,
+      systemVersion: Platform.operatingSystemVersion,
+      ioFactory: () => IOHttpClientAdapter(),
+      nativeFactory: () {
+        final config = URLSessionConfiguration.ephemeralSessionConfiguration();
+        config.httpShouldSetCookies = false;
+        return NativeAdapter(createCupertinoConfiguration: () => config);
+      },
+    );
   }
   return NativeAdapter();
 }
@@ -319,6 +335,39 @@ class _GatewayAdapterWrapper implements HttpClientAdapter {
     return _webViewAdapter ??= WebViewHttpAdapter();
   }
 
+  Future<ResponseBody> _observeRoute(
+    RequestOptions options,
+    String route,
+    Future<ResponseBody> Function() send,
+  ) async {
+    final diagnostics = DohRouteDiagnostics.instance;
+    if (!diagnostics.enabled) return send();
+    final generation = diagnostics.generation;
+    final settings = NetworkSettingsService.instance;
+    final version = settings.version;
+    final dohEnabled = settings.current.dohEnabled;
+    int? status;
+    var failed = false;
+    try {
+      final response = await send();
+      status = response.statusCode;
+      return response;
+    } catch (_) {
+      failed = true;
+      rethrow;
+    } finally {
+      diagnostics.record(
+        generation: generation,
+        settingsVersion: version,
+        route: route,
+        adapter: getRequestAdapterLogName(options) ?? 'unknown',
+        dohEnabled: dohEnabled,
+        status: status,
+        failed: failed,
+      );
+    }
+  }
+
   @override
   Future<ResponseBody> fetch(
     RequestOptions options,
@@ -327,7 +376,17 @@ class _GatewayAdapterWrapper implements HttpClientAdapter {
   ) async {
     // WebView 适配器：主域名 API 请求走 WebView 内核（真正的浏览器 TLS 指纹）
     if (_shouldUseWebView(options)) {
-      return _getWebViewAdapter().fetch(options, requestStream, cancelFuture);
+      Ios14Diagnostics.instance.recordRoute(
+        engine: Ios14RouteEngine.webView,
+        path: NetworkSettingsService.instance.webViewProxyApplied
+            ? Ios14RoutePath.fallback
+            : Ios14RoutePath.webViewUncovered,
+      );
+      return _observeRoute(
+        options,
+        'webview',
+        () => _getWebViewAdapter().fetch(options, requestStream, cancelFuture),
+      );
     }
 
     final settings = NetworkSettingsService.instance;
@@ -363,7 +422,11 @@ class _GatewayAdapterWrapper implements HttpClientAdapter {
         options.path = gatewayUri.toString();
 
         try {
-          return await _inner.fetch(options, requestStream, cancelFuture);
+          return await _observeRoute(
+            options,
+            'gateway',
+            () => _inner.fetch(options, requestStream, cancelFuture),
+          );
         } finally {
           // 恢复原始 URL，确保拦截器响应链始终看到原始域名
           options.baseUrl = savedBaseUrl;
@@ -377,7 +440,11 @@ class _GatewayAdapterWrapper implements HttpClientAdapter {
       }
     }
 
-    return _inner.fetch(options, requestStream, cancelFuture);
+    return _observeRoute(
+      options,
+      'direct-or-rhttp',
+      () => _inner.fetch(options, requestStream, cancelFuture),
+    );
   }
 
   @override
@@ -533,7 +600,33 @@ class _DynamicAdapter implements HttpClientAdapter {
       _rhttpSettings,
     );
     final delegate = _ensureDelegate(desiredType);
-    setRequestAdapterLogName(options, desiredType.name);
+    Ios14Diagnostics.instance.recordRoute(
+      engine: switch (desiredType) {
+        AdapterType.rhttp => Ios14RouteEngine.rhttp,
+        AdapterType.webview => Ios14RouteEngine.webView,
+        AdapterType.network => Ios14RouteEngine.io,
+        AdapterType.native =>
+          usesIosIoTransport ||
+                  Platform.isWindows ||
+                  ((Platform.isIOS || Platform.isMacOS) && kDebugMode) ||
+                  (Platform.isMacOS && _macOSNeedsNativeFallback)
+              ? Ios14RouteEngine.io
+              : (Platform.isIOS || Platform.isMacOS)
+              ? Ios14RouteEngine.cupertino
+              : Ios14RouteEngine.other,
+      },
+      path: _isLoopbackHost(options.uri.host) && _settings.isGatewayMode
+          ? Ios14RoutePath.dohGateway
+          : desiredType == AdapterType.network
+          ? Ios14RoutePath.fallback
+          : Ios14RoutePath.direct,
+    );
+    setRequestAdapterLogName(
+      options,
+      desiredType == AdapterType.native && usesIosIoTransport
+          ? 'io-ios14'
+          : desiredType.name,
+    );
     _currentAdapterType = desiredType;
     return delegate.fetch(options, requestStream, cancelFuture);
   }

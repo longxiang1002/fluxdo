@@ -244,6 +244,10 @@ class NetworkSettingsService {
   bool get pendingStart => _pendingStart;
   int get dnsCacheEntryCount => dnsCacheStatsNotifier.value.visibleHostEntries;
 
+  /// 仅报告代理设置实际完成，不把 DoH 偏好等同于 WebView 已接管。
+  bool get webViewProxyApplied =>
+      _webViewProxySet && _rustProxyService.isRunning && !_lastStartFailed;
+
   /// 获取代理服务（优先使用 Rust 代理）
   DohProxyService get proxyService => _rustProxyService;
 
@@ -260,7 +264,7 @@ class NetworkSettingsService {
       ? (current.echServerUrl ?? current.selectedServerUrl)
       : null;
 
-  // Rust 代理始终为 WebView 提供 DOH/代理支持，不受 rhttp 影响
+  // Rust 代理供 API 使用；WebView 能否接入还取决于系统代理 API（iOS17+）。
   // rhttp 只改变 Dio 用哪个适配器，不改变代理生命周期
   bool get shouldRunLocalProxy =>
       current.dohEnabled || _proxyService.current.isValid;
