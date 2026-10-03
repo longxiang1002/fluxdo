@@ -172,7 +172,7 @@ class ScreenTrack {
   void _tick() {
     final now = DateTime.now();
     final lastTick = _lastTick ?? now;
-    _lastTick = now; // Advance even while idle/frozen; never bank paused time.
+    _lastTick = now; // 闲置或过盾暂停也推进基准，不累计暂停空档。
     if (_cfFrozen) return;
     if (ScreenTrackTiming.isIdle(now, _lastScrolled ?? now)) return;
 

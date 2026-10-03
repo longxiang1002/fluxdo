@@ -1,3 +1,4 @@
+import 'gateway_request.dart';
 import 'dart:io';
 
 import 'package:dio/dio.dart';
@@ -403,40 +404,15 @@ class _GatewayAdapterWrapper implements HttpClientAdapter {
       final port = settings.current.proxyPort;
       final uri = options.uri;
       if (port != null && uri.scheme == 'https') {
-        // 保存原始状态
-        final savedBaseUrl = options.baseUrl;
-        final savedPath = options.path;
-        final savedHost = options.headers['Host'];
-
-        // 改写为明文 HTTP 指向 localhost gateway
-        options.headers['Host'] = uri.host;
-        final gatewayUri = Uri(
-          scheme: 'http',
-          host: '127.0.0.1',
-          port: port,
-          path: uri.path,
-          query: uri.query.isEmpty ? null : uri.query,
-          fragment: uri.fragment.isEmpty ? null : uri.fragment,
-        );
-        options.baseUrl = '';
-        options.path = gatewayUri.toString();
-
-        try {
-          return await _observeRoute(
+        return withGatewayRequest(
+          options,
+          port,
+          () => _observeRoute(
             options,
             'gateway',
             () => _inner.fetch(options, requestStream, cancelFuture),
-          );
-        } finally {
-          // 恢复原始 URL，确保拦截器响应链始终看到原始域名
-          options.baseUrl = savedBaseUrl;
-          options.path = savedPath;
-          if (savedHost != null) {
-            options.headers['Host'] = savedHost;
-          } else {
-            options.headers.remove('Host');
-          }
-        }
+          ),
+        );
       }
     }
 
