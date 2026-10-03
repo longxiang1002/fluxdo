@@ -22,6 +22,7 @@ import '../l10n/s.dart';
 import '../providers/preferences_provider.dart';
 import '../utils/blur_config.dart';
 import '../widgets/draggable_floating_pill.dart';
+import 'diagnostics/ios14_diagnostics.dart';
 
 CookieManager get _cfCookieManager =>
     WindowsWebViewEnvironmentService.instance.cookieManager;
@@ -133,6 +134,7 @@ class CfChallengeService {
   BuildContext? _context;
   static DateTime? _lastToastAt;
   Future<bool>? _activeSessionCompatPrompt;
+
   /// 上次拒绝「切兼容」的时刻;超过 [_sessionCompatDeclineTtl] 后可再问。
   DateTime? _sessionCompatDeclinedAt;
   Completer<BuildContext>? _contextReadyCompleter;
@@ -362,10 +364,7 @@ class CfChallengeService {
         // 关掉自动过盾后不必再问兼容模式 —— 后续撞盾会静默 reject 并由
         // ErrorView 给出手动验证入口,不再走到本询问。
         _sessionCompatDeclinedAt = DateTime.now();
-        showGlobalMessage(
-          S.current.cf_autoVerifyDisabledHint,
-          isError: false,
-        );
+        showGlobalMessage(S.current.cf_autoVerifyDisabledHint, isError: false);
         CfChallengeLogger.log(
           '[PROMPT] User disabled auto verify from compat prompt',
         );
@@ -510,9 +509,7 @@ class CfChallengeService {
       _contextReadyCompleter ??= Completer<BuildContext>();
       debugPrint('[CfChallenge] Waiting for context to be ready...');
       try {
-        ctx = await _contextReadyCompleter!.future.timeout(
-          _contextWaitTimeout,
-        );
+        ctx = await _contextReadyCompleter!.future.timeout(_contextWaitTimeout);
       } on TimeoutException {
         debugPrint(
           '[CfChallenge] 等待 context 超时 '
@@ -664,6 +661,11 @@ class CfChallengeService {
 
     void finish(bool success) {
       if (!resultCompleter.isCompleted) {
+        Ios14Diagnostics.instance.record(
+          success
+              ? Ios14DiagnosticEvent.cfRoundSuccess
+              : Ios14DiagnosticEvent.cfRoundFailure,
+        );
         _completedVerificationResult = success;
         resultCompleter.complete(success);
       }
@@ -724,6 +726,7 @@ class CfChallengeService {
       ),
     );
     overlayState.insert(entry);
+    Ios14Diagnostics.instance.record(Ios14DiagnosticEvent.cfRoundStart);
 
     // 如果初始就是前台，立即执行 promote
     if (forceForeground) {

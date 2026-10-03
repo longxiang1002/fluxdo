@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 
 import 'cf_challenge_service.dart';
 import 'discourse/discourse_service.dart';
+import 'screen_track_timing.dart';
+import 'diagnostics/ios14_diagnostics.dart';
 
 /// 阅读时间上报成功后的回调
 /// [topicId] 话题 ID
@@ -16,8 +18,6 @@ typedef OnTimingsSent =
 class ScreenTrack {
   static const _flushInterval = Duration(seconds: 60);
   static const _tickInterval = Duration(seconds: 1);
-  static const _pauseUnlessScrolled = Duration(minutes: 3);
-  static const _maxTrackingTime = Duration(minutes: 6);
   static const _ajaxFailureDelays = [
     Duration(seconds: 5),
     Duration(seconds: 10),
@@ -138,7 +138,11 @@ class ScreenTrack {
   }
 
   void scrolled() {
-    _lastScrolled = DateTime.now();
+    final now = DateTime.now();
+    if (ScreenTrackTiming.isIdle(now, _lastScrolled ?? now)) {
+      _lastTick = now;
+    }
+    _lastScrolled = now;
   }
 
   void setHasFocus(bool hasFocus) {
@@ -166,16 +170,17 @@ class ScreenTrack {
   }
 
   void _tick() {
-    if (_cfFrozen) return;
     final now = DateTime.now();
+    final lastTick = _lastTick ?? now;
+    _lastTick = now; // Advance even while idle/frozen; never bank paused time.
+    if (_cfFrozen) return;
+    if (ScreenTrackTiming.isIdle(now, _lastScrolled ?? now)) return;
 
-    // 长时间未滚动则暂停追踪
-    final sinceScrolled = now.difference(_lastScrolled ?? now);
-    if (sinceScrolled > _pauseUnlessScrolled) return;
-
-    final diffDuration = now.difference(_lastTick ?? now);
-    _lastTick = now;
-
+    final diffDuration = ScreenTrackTiming.elapsed(
+      now: now,
+      lastTick: lastTick,
+      lastScrolled: _lastScrolled ?? now,
+    );
     final diff = diffDuration.inMilliseconds;
     _lastFlush += diffDuration;
 
@@ -218,9 +223,10 @@ class ScreenTrack {
       final time = entry.value;
       final totalTime = _totalTimings[postNumber] ?? 0;
 
-      if (time > 0 && totalTime < _maxTrackingTime.inMilliseconds) {
-        _totalTimings[postNumber] = totalTime + time;
-        newTimings[postNumber] = time;
+      final submitted = ScreenTrackTiming.submission(time, totalTime);
+      if (submitted > 0) {
+        _totalTimings[postNumber] = totalTime + submitted;
+        newTimings[postNumber] = submitted;
       }
       _timings[postNumber] = 0;
     }
@@ -277,6 +283,7 @@ class ScreenTrack {
     _inProgress = true;
     final next = _consolidatedTimings.removeLast();
     try {
+      Ios14Diagnostics.instance.record(Ios14DiagnosticEvent.timingsSend);
       final statusCode = await _service.topicsTimings(
         topicId: next.topicId,
         topicTime: next.topicTime,
@@ -290,6 +297,7 @@ class ScreenTrack {
 
       // 上报成功后调用回调，同步本地状态
       if (statusCode != null && statusCode < 400) {
+        Ios14Diagnostics.instance.record(Ios14DiagnosticEvent.timingsSuccess);
         _ajaxFailures = 0;
         if (next.timings.isNotEmpty &&
             onTimingsSent != null &&
@@ -298,7 +306,9 @@ class ScreenTrack {
           onTimingsSent!(next.topicId, next.timings.keys.toSet(), highestSeen);
         }
       } else {
+        Ios14Diagnostics.instance.record(Ios14DiagnosticEvent.timingsError);
         if (statusCode != null && _allowedAjaxFailures.contains(statusCode)) {
+          Ios14Diagnostics.instance.record(Ios14DiagnosticEvent.timingsRetry);
           final delayIndex = _ajaxFailures.clamp(
             0,
             _ajaxFailureDelays.length - 1,
@@ -311,6 +321,7 @@ class ScreenTrack {
         }
       }
     } catch (e) {
+      Ios14Diagnostics.instance.record(Ios14DiagnosticEvent.timingsError);
       debugPrint('[ScreenTrack] topicsTimings failed without status: $e');
     } finally {
       _inProgress = false;

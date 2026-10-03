@@ -14,6 +14,7 @@ import 'network/cookie/cookie_jar_service.dart';
 import 'network/cookie/webview_cookie_priming.dart';
 import 'webview_settings.dart';
 import 'windows_webview_environment_service.dart';
+import 'diagnostics/ios14_diagnostics.dart';
 
 /// cf_clearance 自动续期服务。
 ///
@@ -320,6 +321,9 @@ class CfClearanceRefreshService {
       // WebView 创建/加载在平台主线程执行重活,与掉帧时间轴对齐归因
       FrameJankMonitor.logEvent('WEBVIEW', 'CfRefresh run() 开始');
 
+      Ios14Diagnostics.instance.record(
+        Ios14DiagnosticEvent.cfHiddenWebViewInit,
+      );
       await webView.run();
       FrameJankMonitor.logEvent('WEBVIEW', 'CfRefresh run() 完成');
       if (!_canHandleGeneration(gen)) return;
@@ -360,6 +364,9 @@ class CfClearanceRefreshService {
         _headlessWebView = null;
         _webViewController = null;
         try {
+          Ios14Diagnostics.instance.record(
+            Ios14DiagnosticEvent.cfHiddenWebViewDispose,
+          );
           await webView.dispose();
         } catch (disposeError) {
           CfChallengeLogger.log(
@@ -544,6 +551,11 @@ document.close();
     }
 
     try {
+      if (wv != null) {
+        Ios14Diagnostics.instance.record(
+          Ios14DiagnosticEvent.cfHiddenWebViewDispose,
+        );
+      }
       await wv?.dispose();
     } catch (e) {
       CfChallengeLogger.log('[CfRefresh] WebView dispose 异常: $e');
@@ -629,16 +641,15 @@ document.close();
     // 后自然补上。初始 Turnstile 运行期(_initialTimer 未清)只恢复不
     // 挂起,避免把首次验证拖到超时误判重建。
     if (io.Platform.isAndroid) {
-      _scrollPauseTicker = Timer.periodic(
-        const Duration(milliseconds: 500),
-        (_) {
-          if (!_canHandleGeneration(gen)) {
-            _scrollPauseTicker?.cancel();
-            return;
-          }
-          unawaited(_updateScrollPause());
-        },
-      );
+      _scrollPauseTicker = Timer.periodic(const Duration(milliseconds: 500), (
+        _,
+      ) {
+        if (!_canHandleGeneration(gen)) {
+          _scrollPauseTicker?.cancel();
+          return;
+        }
+        unawaited(_updateScrollPause());
+      });
     }
   }
 
