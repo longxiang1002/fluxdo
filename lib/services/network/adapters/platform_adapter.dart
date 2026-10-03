@@ -347,6 +347,14 @@ class _GatewayAdapterWrapper implements HttpClientAdapter {
     final settings = NetworkSettingsService.instance;
     final version = settings.version;
     final dohEnabled = settings.current.dohEnabled;
+    final resolverMatched =
+        settings.proxyService.isUsingDohServer(
+          settings.current.selectedServerUrl,
+        ) &&
+        !settings.isApplying.value &&
+        !settings.pendingStart &&
+        !settings.lastStartFailed &&
+        (settings.current.serverIp?.isEmpty ?? true);
     int? status;
     var failed = false;
     try {
@@ -363,6 +371,7 @@ class _GatewayAdapterWrapper implements HttpClientAdapter {
         route: route,
         adapter: getRequestAdapterLogName(options) ?? 'unknown',
         dohEnabled: dohEnabled,
+        gatewayResolverMatched: resolverMatched && version == settings.version,
         status: status,
         failed: failed,
       );

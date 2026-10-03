@@ -30,6 +30,7 @@ class _Ios14NetworkDiagnosticsPageState
   void initState() {
     super.initState();
     _settings.notifier.addListener(_changed);
+    _settings.isApplying.addListener(_changed);
   }
 
   void _changed() {
@@ -39,6 +40,7 @@ class _Ios14NetworkDiagnosticsPageState
   @override
   void dispose() {
     _settings.notifier.removeListener(_changed);
+    _settings.isApplying.removeListener(_changed);
     super.dispose();
   }
 
@@ -86,6 +88,13 @@ class _Ios14NetworkDiagnosticsPageState
     'dohConfigured': _settings.current.dohEnabled,
     'gatewayRunning': _settings.isGatewayMode,
     'proxyStartFailed': _settings.lastStartFailed,
+    'configurationApplying':
+        _settings.isApplying.value || _settings.pendingStart,
+    'serverIpOverrideConfigured':
+        _settings.current.serverIp?.isNotEmpty ?? false,
+    'proxyResolverMatchesSelection': _settings.proxyService.isUsingDohServer(
+      _settings.current.selectedServerUrl,
+    ),
     'webViewProxyApplied': _settings.webViewProxyApplied,
     'iosIoFallback': usesIosIoTransport,
     'dnsTestVersion': _testedVersion,
@@ -111,6 +120,9 @@ class _Ios14NetworkDiagnosticsPageState
           Text('DoH 开关：${_settings.current.dohEnabled ? "开启" : "关闭"}'),
           Text('本地 DoH 网关：${_settings.isGatewayMode ? "运行中" : "未运行"}'),
           Text('代理启动失败：${_settings.lastStartFailed ? "是" : "否"}'),
+          Text(
+            '配置应用中：${_settings.isApplying.value || _settings.pendingStart ? "是，稍后重新验证" : "否"}',
+          ),
           Text(
             'WebView 代理实际设置：${_settings.webViewProxyApplied ? "已应用" : "未应用"}',
           ),
@@ -140,7 +152,7 @@ class _Ios14NetworkDiagnosticsPageState
             onChanged: (value) => setState(() => _routes.setEnabled(value)),
           ),
           const Text(
-            'gateway 表示请求实际交给本地网关；HTTP 状态仅为响应头结果。direct-or-rhttp 不等于已验证 DoH；webview 不等于已接入应用 DoH。配置代号不同的记录仅作历史参考。',
+            'gateway 表示请求实际交给本地网关；还需 gatewayResolverMatched=true 才说明解析器配置匹配且无固定 IP 覆盖。HTTP 状态仅为响应头结果。direct-or-rhttp 不等于已验证 DoH；webview 不等于已接入应用 DoH。配置代号不同的记录仅作历史参考。',
           ),
           Wrap(
             spacing: 8,

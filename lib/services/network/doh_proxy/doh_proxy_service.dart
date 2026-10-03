@@ -46,6 +46,10 @@ class DohProxyService {
   /// 代理是否正在运行
   bool get isRunning => _isRunning;
 
+  /// 只比较已启动代理的配置，不以界面偏好代替运行状态。
+  bool isUsingDohServer(String server) =>
+      _isRunning && _currentEnableDoh == true && _currentDohServer == server;
+
   /// 代理端口
   int? get port => _port;
 

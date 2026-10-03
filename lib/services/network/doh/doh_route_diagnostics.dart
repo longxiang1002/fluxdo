@@ -27,6 +27,7 @@ class DohRouteDiagnostics {
     required String route,
     required String adapter,
     required bool dohEnabled,
+    bool gatewayResolverMatched = false,
     int? status,
     bool failed = false,
   }) {
@@ -38,6 +39,8 @@ class DohRouteDiagnostics {
       'route': routes.contains(route) ? route : 'unknown',
       'adapter': adapters.contains(adapter) ? adapter : 'unknown',
       'dohConfigured': dohEnabled,
+      'gatewayResolverMatched':
+          dohEnabled && route == 'gateway' && gatewayResolverMatched,
       'httpStatus': status,
       'transportFailed': failed,
     });

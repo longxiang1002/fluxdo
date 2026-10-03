@@ -49,4 +49,28 @@ void main() {
     record['settingsVersion'] = 999;
     expect(d.snapshot().single['settingsVersion'], 7);
   });
+  test('匹配状态必须同时满足网关路由、DoH开启和运行配置匹配', () {
+    final d = DohRouteDiagnostics()..setEnabled(true);
+    for (final entry in [
+      (false, 'gateway', true),
+      (true, 'webview', true),
+      (true, 'gateway', false),
+      (true, 'gateway', true),
+    ]) {
+      d.record(
+        generation: d.generation,
+        settingsVersion: 1,
+        route: entry.$2,
+        adapter: 'io-ios14',
+        dohEnabled: entry.$1,
+        gatewayResolverMatched: entry.$3,
+      );
+    }
+    expect(d.snapshot().map((r) => r['gatewayResolverMatched']), [
+      false,
+      false,
+      false,
+      true,
+    ]);
+  });
 }
