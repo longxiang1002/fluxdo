@@ -22,19 +22,23 @@ import Foundation
       return nil
     }
 
+    // 注意：kCFNetworkProxiesHTTPSEnable/HTTPSProxy/HTTPSPort 是 macOS-only
+    // API，iOS 上编译报 unavailable。这里使用与之等值的字符串字面量（CFNetwork
+    // 代理字典的标准 key），iOS/macOS 均可编译；iOS 系统代理通常只填 HTTP key，
+    // HTTPS key 未配置时自然回落到 HTTP 分支，行为不变。
     if let https = proxyEntry(
       settings,
-      enabledKey: kCFNetworkProxiesHTTPSEnable as String,
-      hostKey: kCFNetworkProxiesHTTPSProxy as String,
-      portKey: kCFNetworkProxiesHTTPSPort as String
+      enabledKey: "HTTPSEnable",
+      hostKey: "HTTPSProxy",
+      portKey: "HTTPSPort"
     ) {
       return https
     }
     return proxyEntry(
       settings,
-      enabledKey: kCFNetworkProxiesHTTPEnable as String,
-      hostKey: kCFNetworkProxiesHTTPProxy as String,
-      portKey: kCFNetworkProxiesHTTPPort as String
+      enabledKey: "HTTPEnable",
+      hostKey: "HTTPProxy",
+      portKey: "HTTPPort"
     )
   }
 
