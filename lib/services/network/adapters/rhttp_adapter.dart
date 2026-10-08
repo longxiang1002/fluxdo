@@ -313,10 +313,10 @@ class RhttpAdapter implements HttpClientAdapter {
     ProxySettings ps,
   ) {
     if (!ps.isValid) {
-      // 未配置上游代理时,Windows 下跟随注册表系统代理,与 WebView2
-      // (默认走系统代理)保持同一出口。出口不一致时验证 WebView 铸出的
-      // cf_clearance 绑定代理节点 IP,对直连的 Dio 无效,会造成 CF 验证
-      // 无限循环。
+      // 未配置上游代理时,Windows/iOS 下跟随系统代理,与 WebView
+      // (WebView2 / WKWebView 都默认走系统代理)保持同一出口。出口不一致时
+      // 验证 WebView 铸出的 cf_clearance 绑定代理节点 IP,对直连的 Dio
+      // 无效,会造成 CF 验证无限循环。
       final systemProxy = SystemProxyService.instance.effectiveProxyUrl;
       if (systemProxy != null) {
         return rhttp.ProxySettings.proxy(systemProxy);

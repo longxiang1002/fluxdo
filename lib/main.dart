@@ -386,9 +386,9 @@ Future<void> main() async {
     await RhttpSettingsService.instance.forceDisable();
   }
 
-  // Windows 固定系统代理必须先于本地 DoH/WebView 网关读取，网关才能按
-  // 「应用代理 > 系统代理 > 直连」选择首次启动的上游出口。
-  if (Platform.isWindows) {
+  // Windows/iOS 系统代理必须早于 rhttp / WebView 网关初始化，两侧才能
+  // 按「应用代理 > 系统代理 > 直连」选择首次启动的上游出口。
+  if (Platform.isWindows || Platform.isIOS) {
     SystemProxyService.instance.start();
   }
   await NetworkSettingsService.instance.initialize(prefs);

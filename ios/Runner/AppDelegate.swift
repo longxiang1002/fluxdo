@@ -28,6 +28,21 @@ import workmanager_apple
         messenger: controller.binaryMessenger,
         viewController: controller
       )
+      // 注册系统代理 channel（iOS 读取 CFNetwork 系统代理设置，
+      // 供 rhttp/Dio 与 WKWebView 保持同一出口）
+      let systemProxyChannel = FlutterMethodChannel(
+        name: "com.fluxdo/system_proxy",
+        binaryMessenger: controller.binaryMessenger
+      )
+      systemProxyChannel.setMethodCallHandler { (call, result) in
+        switch call.method {
+        case "effectiveProxyUrl":
+          result(SystemProxyReader.shared.effectiveProxyUrl)
+        default:
+          result(FlutterMethodNotImplemented)
+        }
+      }
+
       // 注册代理 CA 证书 channel（原生层 SSL challenge 拦截）
       let proxyCertChannel = FlutterMethodChannel(
         name: "com.fluxdo/proxy_cert",
