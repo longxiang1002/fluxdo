@@ -82,8 +82,7 @@ class SystemProxyService {
 
   Future<void> _refreshIos() async {
     try {
-      final proxy = await _iosChannel
-          .invokeMethod<String>('effectiveProxyUrl');
+      final proxy = await _iosChannel.invokeMethod<String>('effectiveProxyUrl');
       _updateEffective(proxy);
     } catch (e) {
       debugPrint('[SystemProxy] iOS 读取系统代理失败: $e');
