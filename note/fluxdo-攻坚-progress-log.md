@@ -83,3 +83,60 @@ parse-only `total_errors=0` ✅。`flutter test` 本机跑不动（内存/`dart:
 
 **下一步**：核对 run `37852245336` 是否**全绿**（含新 Release 步骤）、
 是否产出 `ios14-test-N` Release + IPA 直链；老板实机验证出口一致性。
+
+## 2026-10-09 07:00 CST | WebView 出口采样器（路径 C 的前提实证）+ 上轮 CI 全绿确认
+
+**上轮 CI 核对（结论）**：run `37852245336`（commit `cbb44e38`，路径 C1）
+→ **completed success，全绿**（step 7 格式✅ / 8 测试✅ / 9 构建✅ / 10 上传✅ /
+**13 发布 Release ✅**）。此前「Release 403 假失败」的修复生效。
+产物：**Release `ios14-test-18`**，
+IPA `fluxdo-ios14-test-18-cbb44e38.ipa`（54.8 MB）
+`https://github.com/longxiang1002/fluxdo/releases/download/ios14-test-18/fluxdo-ios14-test-18-cbb44e38.ipa`
+
+**本轮改动**（commit `abcf9ed5`，已 push）：路径 C 只做了「让 DoH 出站跟随系统代理」，
+但**没证明过 WKWebView 真的走系统代理**。`SystemProxyReader` 读的是**系统设置**
+（`CFNetworkCopySystemProxySettings`），读得到 ≠ App 进程内出口就被它决定
+（PAC-only / 进程内有其它代理配置时都不成立）。本轮把前提做成**可实证的采样**：
+
+- `ios/Runner/SystemProxyReader.swift`：新增 `proxyProbeSnapshot()`，
+  用 `CFNetworkCopyProxiesForURL`（CFNetwork 栈同一份求值）读**本 App 进程
+  真实生效**的代理字典。只回固定字段：`type`（http/https/socks/pac/pacInline/direct）、
+  `host`/`port`、`hasPacScript`/`pacIsRemote`（**不含脚本 URL 与正文**）、
+  `consistentWithSystem`（与系统设置 host:port 是否一致）。
+- `ios/Runner/AppDelegate.swift`：在原 `com.fluxdo/system_proxy` channel 上加
+  `proxyProbe` 方法（**不新增 channel**）。
+- `lib/services/network/system_proxy_service.dart`：`SystemProxyProbe` /
+  `SystemProxyProbeEntry` 模型 + `probeEffectiveProxy()` + `exportJson()`；
+  `effectiveExitIsSystemProxy` 给出判定（全部条目都是同一固定代理且与系统设置一致
+  → `true`；有 PAC/直连/不一致 → `false`；无条目 → `null` 不冒充成功）。
+  脱敏 `describe()` 串直接进日志。
+- `lib/pages/webview_page.dart`：`onLoadStop` 时**每次导航采样一次**，打印
+  `[DOH] 内部浏览器出口采样: entries=[...] dohGatewayUpstream=...`；
+  前提不成立时额外打 `⚠️ WebView 出口未被系统代理决定`。
+- `lib/pages/ios14_diagnostics_page.dart`：复制的脱敏报告附带 `webviewExitProbe`。
+- `test/services/network/webview_exit_probe_test.dart`（新增，8 例，**本地全过**）+
+  已加入 CI 测试列表；`test/pages/ios14_diagnostics_page_test.dart` 适配。
+
+**本地校验**：`dart format --set-exit-if-changed` 对 CI 全量改动集
+（30 个 Dart 文件）**0 changed**；parse-only `total_errors=0`；
+`flutter test test/services/network/webview_exit_probe_test.dart` **8/8 通过**；
+`flutter test test/pages/ios14_diagnostics_page_test.dart` **1/1 通过**。
+（`gateway_system_proxy_source_test.dart` 本地跑不了：缺 `lib/l10n/slang/strings.g.dart`
+代码生成产物，与本次改动无关，CI 先跑 `project_prep.dart` 所以 CI 侧正常。）
+
+**测试抓到的两个真实 bug（已修）**：`describe()` 用了
+`entries.join(',')` → 打出 `Instance of 'SystemProxyProbeEntry'`
+（核心证据串不可读），补 `toString()` 并加 `isNot(contains('Instance of'))` 断言；
+`pacIsRemote` 语义在测试里被漏传，补断言后暴露并修正用例。
+
+**CI**：commit `abcf9ed5` → run **`37858290951`**（2026-10-09 07:14 CST 触发，queued）。
+按历史经验一次 run 20~40min，本轮 25min 预算内等不到结论。
+
+**下一步**：
+1. 核对 run `37858290951` 是否全绿、是否产出 `ios14-test-19` + IPA 直链。
+2. 老板实机：开启内部浏览器 → 看 `[DOH] 内部浏览器出口采样` 那行
+   `exitIsSystemProxy` 是 true 还是 false。
+   - `true` → 路径 C 前提成立，两通道出口同源，过盾应不再因出口 IP 不一致失败；
+   - `false`（PAC/直连）→ 路径 C 不足以统一出口，需转 `NEPacketTunnelProvider`
+     或改「WebView 侧跟随 DoH 而非反过来」的方向。
+3. 该采样仅 iOS 生效、失败不影响导航（不引入任何 iOS 暂停/挂起逻辑）。

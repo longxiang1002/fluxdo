@@ -99,8 +99,50 @@ iOS <17 无法用 `WKWebsiteDataStore.proxyConfigurations` 把 WebView 指向本
 - [x] ~~核对 CI run `37838762957`（commit `b1a5e341`）step 9/10~~ → **全绿**：
       格式✅ 兼容✅ **构建未签名 IPA ✅ 上传已检查的测试包 ✅**（2026-10-09 06:00 轮核对）
 - [x] **路径 C1：iOS DoH 出站跟随系统代理** ✅ 本轮完成（见上）
-- [ ] 老板实机验证：内部浏览器是否走 DoH 出口（诊断日志已加强）
-- [ ] 里程碑 tag（Release ios14-test-8 已发布）
+- [ ] 老板实机验证：内部浏览器是否走 DoH 出口（**出口采样日志已就绪**：看 `[DOH] 内部浏览器出口采样` 的 `exitIsSystemProxy`）
+- [x] 里程碑 tag：**Release `ios14-test-18`**（commit `cbb44e38`，路径 C1）已发布，含 IPA 直链
+
+## 本轮 CI（2026-10-09 07:00 CST）
+
+- **上轮 run `37852245336`（commit `cbb44e38`，路径 C1）→ `completed success` 全绿**：
+  step 7 格式✅ / 8 兼容与回归✅ / 9 构建 IPA✅ / 10 上传✅ / **13 发布 Release✅**
+  → 此前「Release 403 假失败」的修复（`cbb44e38` 内）已生效。
+- **产物**：Release **`ios14-test-18`**，IPA
+  `fluxdo-ios14-test-18-cbb44e38.ipa`（54.8 MB）
+  → https://github.com/longxiang1002/fluxdo/releases/download/ios14-test-18/fluxdo-ios14-test-18-cbb44e38.ipa
+- 本轮 commit `abcf9ed5` → 新 run **`37858290951`**（07:14 CST 触发，queued，下轮核对）。
+
+## 🎯 本轮改造（2026-10-09 07:00 CST）：WebView 出口采样器
+
+**动机**：路径 C1 只是「让 DoH 出站跟随系统代理」，但**从未证明
+WKWebView 真的走系统代理**。`SystemProxyReader` 读的是**系统设置**，
+读得到 ≠ App 进程内出口就被它决定（PAC-only / 进程内另有代理配置时不成立）。
+本轮把「前提」变成**可实证的采样**，避免拿假设当结论。
+
+- [x] `ios/Runner/SystemProxyReader.swift`：`proxyProbeSnapshot()` —
+      `CFNetworkCopyProxiesForURL` 读**本 App 进程真实生效**的代理；
+      只回固定字段（type/host/port/hasPacScript/pacIsRemote/consistentWithSystem），
+      **不含脚本 URL 与正文、不含凭据**
+- [x] `ios/Runner/AppDelegate.swift`：在既有 `com.fluxdo/system_proxy` channel
+      上增加 `proxyProbe` 方法（不新增 channel）
+- [x] `lib/services/network/system_proxy_service.dart`：`SystemProxyProbe` 模型 +
+      `probeEffectiveProxy()` + `exportJson()` + 脱敏 `describe()`；
+      `effectiveExitIsSystemProxy` 判定（true/false/null 三态，无条目不冒充成功）
+- [x] `lib/pages/webview_page.dart`：`onLoadStop` 每次导航采样一次并打日志
+- [x] `lib/pages/ios14_diagnostics_page.dart`：脱敏报告附带 `webviewExitProbe`
+- [x] `test/services/network/webview_exit_probe_test.dart`（新增 8 例，本地全过），
+      已加入 CI 测试列表；`ios14_diagnostics_page_test.dart` 适配
+- [x] commit `abcf9ed5` 已 push，CI run `37858290951` 已触发
+
+**测试抓到的真实 bug（已修）**：`describe()` 用 `entries.join(',')` 打出
+`Instance of 'SystemProxyProbeEntry'`（核心证据不可读）→ 补 `toString()` +
+断言 `isNot(contains('Instance of'))`；`pacIsRemote` 用例漏传 → 补断言后修正。
+
+**下一步（交给验收）**：老板实机开内部浏览器，看日志
+`[DOH] 内部浏览器出口采样: ... exitIsSystemProxy=?`
+- `true` → 路径 C 前提成立，两通道出口同源；
+- `false`（PAC/直连）→ 路径 C 不足以统一出口，转 `NEPacketTunnelProvider`
+  或「WebView 侧跟随 DoH」方向。
 
 ## 本轮 CI（2026-10-09 07:00 CST）
 
