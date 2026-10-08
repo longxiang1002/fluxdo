@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'dart:convert';
 import '../services/diagnostics/ios14_diagnostics.dart';
+import '../services/network/system_proxy_service.dart';
 
 /// 由网络设置打开的测试诊断页面，采集需要用户主动开启。
 class Ios14DiagnosticsPage extends StatefulWidget {
@@ -18,7 +20,17 @@ class _Ios14DiagnosticsPageState extends State<Ios14DiagnosticsPage> {
 
   Future<void> _copy() async {
     try {
-      await Clipboard.setData(ClipboardData(text: _diagnostics.exportJson()));
+      // 附带「内部浏览器出口」采样：证明 WebView 出口是否由系统代理决定，
+      // 即 DoH 出站（跟随系统代理）与 WebView 出口能否一致。
+      // 非 iOS 或读取失败时为 null，不影响其余报告。
+      final exitProbe = await SystemProxyProbe.exportJson();
+      final report = <String, Object?>{
+        ...jsonDecode(_diagnostics.exportJson()) as Map<String, Object?>,
+        'webviewExitProbe': exitProbe,
+      };
+      await Clipboard.setData(
+        ClipboardData(text: const JsonEncoder.withIndent('  ').convert(report)),
+      );
       if (mounted) setState(() => _status = '诊断报告已复制');
     } catch (_) {
       if (mounted) setState(() => _status = '复制失败，请重试');

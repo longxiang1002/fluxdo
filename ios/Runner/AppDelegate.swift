@@ -38,6 +38,9 @@ import workmanager_apple
         switch call.method {
         case "effectiveProxyUrl":
           result(SystemProxyReader.shared.effectiveProxyUrl)
+        case "proxyProbe":
+          // 诊断：CFNetwork 已生效代理字典（只回固定字段，无脚本正文/凭据）
+          result(SystemProxyReader.shared.proxyProbeSnapshot())
         default:
           result(FlutterMethodNotImplemented)
         }

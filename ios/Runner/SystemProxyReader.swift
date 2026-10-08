@@ -47,6 +47,78 @@ import Foundation
     )
   }
 
+  /// 诊断用：读取 CFNetwork 已生效的代理配置（`CFNetworkCopyProxiesForURL`）。
+  ///
+  /// 只返回**固定字段、无 URL/无凭据、无 PAC 脚本正文**的结构化快照，
+  /// 供 Dart 侧判断「WKWebView 的出口 == DoH 网关的出站」。
+  ///
+  /// `effectiveProxyUrl` 读的是**系统设置**里的代理（App 进程配置不出现在那里）；
+  /// 本方法读的是 **App 进程真实生效**的代理字典，两者一致才说明
+  /// 「App 内随系统代理」这一前提成立。
+  ///
+  /// 每项字段：`type`（http|https|socks|pac|direct）、`probeHost`（本机地址）、
+  /// `host`/`port`（非 pac 时）、`hasPacScript`（仅布尔，不含脚本内容）、
+  /// `consistentWithSystem`（与 `effectiveProxyUrl` 的 host:port 是否一致）。
+  @objc func proxyProbeSnapshot() -> [String: Any] {
+    let probeURL = URL(string: "https://example.invalid/")!
+    let systemProxyUrl = effectiveProxyUrl
+
+    guard let entries = CFNetworkCopyProxiesForURL(
+      probeURL as CFURL,
+      nil
+    )?.takeRetainedValue() as? [[String: Any]] else {
+      return [
+        "count": 0,
+        "systemProxyUrl": systemProxyUrl as Any,
+      ]
+    }
+
+    var items: [[String: Any]] = []
+    for entry in entries {
+      let type = (entry["kCFProxyTypeKey"] as? String) ?? "unknown"
+      var item: [String: Any] = [
+        "type": Self.shortProxyType(type),
+        "probeHost": probeURL.host ?? "",
+      ]
+
+      if let host = entry["kCFProxyHostNameKey"] as? String, !host.isEmpty {
+        item["host"] = host
+      }
+      if let port = entry["kCFProxyPortNumberKey"] as? NSNumber {
+        item["port"] = port.intValue
+      }
+      if let script = entry["kCFProxyAutoConfigurationURLKey"] as? String {
+        // 只记「有 PAC」与是否远端，脚本内容与 URL 本体不外泄。
+        item["hasPacScript"] = true
+        item["pacIsRemote"] = !script.isEmpty
+      }
+
+      if let host = item["host"] as? String, let port = item["port"] as? Int {
+        item["consistentWithSystem"] = (systemProxyUrl == "http://\(host):\(port)")
+      }
+      items.append(item)
+    }
+
+    return [
+      "count": items.count,
+      "systemProxyUrl": systemProxyUrl as Any,
+      "entries": items,
+    ]
+  }
+
+  /// 把 CFNetwork 的长常量名压成长短串；未知类型原样保留，便于日后核对。
+  private static func shortProxyType(_ type: String) -> String {
+    switch type {
+    case "kCFProxyTypeHTTP": return "http"
+    case "kCFProxyTypeHTTPS": return "https"
+    case "kCFProxyTypeSOCKS": return "socks"
+    case "kCFProxyTypeAutoConfigurationURL": return "pac"
+    case "kCFProxyTypeAutoConfigurationJavaScript": return "pacInline"
+    case "kCFProxyTypeNone": return "direct"
+    default: return type
+    }
+  }
+
   private func proxyEntry(
     _ settings: [String: Any],
     enabledKey: String,
