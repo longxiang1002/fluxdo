@@ -301,14 +301,22 @@ class CfChallengeInterceptor extends Interceptor {
               CfChallengeService.isCfChallengeResponse(e.response);
 
           // 验证拿到新 clearance 后，原生链路仍被 CF 拒绝，说明问题不只是
-          // Cookie，而是当前原生网络身份未被信任。仅对用户可见请求询问一次，
-          // 用户确认后本次会话改用浏览器网络栈，并立即重放原请求。
+          // Cookie，而是当前原生网络身份未被信任。数据请求(无副作用)自动
+          // 改用浏览器网络栈重放——这是"频繁过盾"循环的关键消解：验证页与
+          // WebView 适配器同走浏览器网络栈，免去"Dio 直连与验证出口不一致 →
+          // clearance 对 Dio 无效 → 再验证"的死循环；同时静默/数据请求不再弹
+          // 确认窗(退后台时用户根本看不到，只会造成循环打断)。写操作仍询问
+          // 一次：切换传输方式对提交类请求有副作用，需要用户知情确认。
           if (retryStillBlockedByCf &&
               !isSilent &&
               requestCanUseWebViewAdapter(retryOptions)) {
             final webViewSettings = WebViewAdapterSettingsService.instance;
+            final isDataRequest = !_mutationMethods.contains(
+              retryOptions.method.toUpperCase(),
+            );
             final shouldFallback =
                 webViewSettings.effectiveEnabled ||
+                isDataRequest ||
                 await cfService.confirmSessionCompatibilityMode();
             if (shouldFallback) {
               webViewSettings.enableSessionFallback();
@@ -317,14 +325,22 @@ class CfChallengeInterceptor extends Interceptor {
               retryOptions.extra.remove(FluxRequestKeys.skipWebViewAdapter);
               try {
                 final fallbackResponse = await dio.fetch(retryOptions);
-                CfChallengeService.showGlobalMessage(
-                  S.current.cf_sessionCompatEnabled,
-                  isError: false,
-                );
-                CfChallengeLogger.log(
-                  '[INTERCEPTOR] Native retry still blocked; '
-                  'session WebView fallback succeeded',
-                );
+                if (isDataRequest) {
+                  // 数据请求自动切换：不打断用户，仅在日志里留痕。
+                  CfChallengeLogger.log(
+                    '[INTERCEPTOR] Native retry still blocked; auto session '
+                    'WebView fallback succeeded (data request)',
+                  );
+                } else {
+                  CfChallengeService.showGlobalMessage(
+                    S.current.cf_sessionCompatEnabled,
+                    isError: false,
+                  );
+                  CfChallengeLogger.log(
+                    '[INTERCEPTOR] Native retry still blocked; '
+                    'session WebView fallback succeeded',
+                  );
+                }
                 return handler.resolve(fallbackResponse);
               } catch (fallbackError) {
                 // 会话级兼容必须以首次真实请求成功为准；失败时立即回滚，
