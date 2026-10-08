@@ -84,6 +84,11 @@ class CfClearanceRefreshService {
   Timer? _scrollPauseTicker;
   bool _webViewPausedForScroll = false;
 
+  /// [webViewController] 实际进入了挂起态。与 [_webViewPausedForScroll] 区别在于
+  /// 后者是「期望挂起」,本字段是「已确认平台调用成功」。实例销毁/重建时用它
+  /// 判断是否需要兜底 resume,避免把上一实例的阻塞态留给新实例。
+  InAppWebViewController? _pausedController;
+
   /// 获取当前缓存的 sitekey。
   String? get sitekey => _sitekey;
 
@@ -485,6 +490,11 @@ document.close();
     _staleReloads++;
     FrameJankMonitor.logEvent('WEBVIEW', 'CfRefresh reload($reason)');
 
+    // 重载会换掉整页脚本环境:若此刻仍处于滚动挂起态,新页面的 Turnstile JS
+    // 会从「已被 alert 阻塞」的状态起步(实例级 isPausedTimers 仍为 true),
+    // 定时器不跑 → 再次 stale。先放开挂起,交给 ticker 在滚动结束后重新判定。
+    await _releaseScrollPauseIfNeeded();
+
     try {
       final html = _buildTurnstileHtml(sitekey);
       if (io.Platform.isWindows) {
@@ -525,6 +535,8 @@ document.close();
     _isRunning = false;
     _isSyncingCookies = false;
     _cancelRuntimeTimers();
+    // 必须在清空 _webViewController 之前释放(此时实例仍可用)。
+    await _releaseScrollPauseIfNeeded();
 
     final wv = _headlessWebView;
     final controller = _webViewController;
@@ -668,28 +680,62 @@ document.close();
   Future<void> _updateScrollPause() async {
     final controller = _webViewController;
     if (controller == null) return;
+    // 换过实例(重载/重建)后旧记账失效:上一次调用绑定的是旧 controller,
+    // 新实例从 resumed 起步,不能沿用旧标志而漏掉恢复分支。
+    if (!identical(_pausedController, controller)) {
+      _pausedController = null;
+      _webViewPausedForScroll = false;
+    }
     final wantPause = ScrollBusySignal.isBusy && _initialTimer == null;
     if (wantPause == _webViewPausedForScroll) return;
     try {
       if (wantPause) {
-        _webViewPausedForScroll = true;
         if (io.Platform.isAndroid) {
           await controller.pause();
         } else {
           // 仅 iOS 走到这里(Windows 在 start() 已整体禁用;Web 无 Dart io)。
           await controller.pauseTimers();
         }
+        // 平台调用成功后才记账,并绑定到实际被挂起的实例。
+        _pausedController = controller;
+        _webViewPausedForScroll = true;
       } else {
-        _webViewPausedForScroll = false;
         if (io.Platform.isAndroid) {
           await controller.resume();
         } else {
           await controller.resumeTimers();
         }
+        _pausedController = null;
+        _webViewPausedForScroll = false;
       }
     } catch (e) {
       _webViewPausedForScroll = false;
       CfChallengeLogger.log('[CfRefresh] 滚动挂起/恢复失败: $e');
+    }
+  }
+
+  /// 销毁/重建前把挂起态放开。
+  ///
+  /// iOS 的 [InAppWebViewController.pauseTimers] 是「执行 alert() 阻塞 JS」的
+  /// 实现,若实例在挂起态被替换,新实例并不会自动解除旧实例的阻塞(上游仅在
+  /// dispose 时 resume)。这里在换实例/停止前显式兜底 resume,确保 Turnstile
+  /// 的 JS 定时器不会永久停摆导致 cf_clearance 不再续期。
+  Future<void> _releaseScrollPauseIfNeeded() async {
+    final paused = _pausedController;
+    _pausedController = null;
+    _webViewPausedForScroll = false;
+    if (paused == null) return;
+    try {
+      if (io.Platform.isAndroid) {
+        await paused.resume();
+      } else {
+        await paused.resumeTimers();
+      }
+      CfChallengeLogger.log(
+        '[CfRefresh] 换实例/停止前已释放滚动挂起',
+      );
+    } catch (e) {
+      CfChallengeLogger.log('[CfRefresh] 释放滚动挂起失败(忽略): $e');
     }
   }
 
