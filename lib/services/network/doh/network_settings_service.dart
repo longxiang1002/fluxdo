@@ -557,9 +557,7 @@ class NetworkSettingsService {
 
       final upstream = GatewayUpstream.resolve(
         applicationProxy: _proxyService.current,
-        systemProxyUrl: Platform.isWindows
-            ? SystemProxyService.instance.effectiveProxyUrl
-            : null,
+        systemProxyUrl: _systemProxyUrlForGateway(),
       );
       final effectiveEchServer = _effectiveEchServerUrl;
       final mitmConnect = WebViewMitmPolicy.useMitmConnect(
@@ -759,6 +757,29 @@ class NetworkSettingsService {
       return;
     }
     await _rustProxyService.stop();
+  }
+
+  /// 传给 Rust 网关的「系统代理」上游。
+  ///
+  /// 背景（iOS 14 内部浏览器 DoH 接管的核心）：
+  /// - WKWebView **默认跟随系统代理**（CFNetwork 栈），而本地 DoH 网关
+  ///   （`127.0.0.1:<port>`）不在系统代理里。
+  /// - iOS 17+ 可用 `WKWebsiteDataStore.proxyConfigurations` 把 WebView 直接
+  ///   指向本地网关，两通道出口天然一致；iOS 14 无此 API
+  ///   （见 [_applyWebViewProxy] 的能力说明），WebView 只能走系统代理。
+  /// - 此时若 DoH 出站**直连**，则「WebView 经系统代理」与「DoH 直连」出口 IP
+  ///   不一致 → 验证页铸出的 cf_clearance 绑的是代理节点 IP，对直连请求无效
+  ///   → 过盾死循环。
+  ///
+  /// 因此在 iOS 上同样把系统代理交给网关，使 DoH 出站与 WKWebView 走**同一出口**，
+  /// 达到「出口一致」的目标。
+  ///
+  /// 仅 Windows / iOS 有意义：其余平台 [SystemProxyService.effectiveProxyUrl]
+  /// 恒为 null（直连），传入与传 null 等价。
+  /// 注：VPN/TUN 模式下系统不写代理，二者都经 TUN，天然一致，此处返回 null。
+  String? _systemProxyUrlForGateway() {
+    if (!Platform.isWindows && !Platform.isIOS) return null;
+    return SystemProxyService.instance.effectiveProxyUrl;
   }
 
   Future<void> _applyWebViewProxy() async {

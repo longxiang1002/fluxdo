@@ -64,6 +64,7 @@ jobs:
             test/services/network/adapters/apple_transport_policy_test.dart \
             test/services/network/doh_route_diagnostics_test.dart \
             test/services/network/adapters/gateway_request_test.dart \
+            test/services/network/gateway_system_proxy_source_test.dart \
             test/services/screen_track_timing_test.dart \
             test/services/diagnostics/ios14_diagnostics_test.dart \
             test/pages/ios14_diagnostics_page_test.dart \
@@ -112,8 +113,15 @@ jobs:
           rm -f "dist/fluxdo-ios14-test-unsigned.ipa"
           echo "RELEASE_IPA_NAME=${NEWNAME}" >> "$GITHUB_ENV"
           echo "重命名后: ${NEWNAME}"
-      - name: 发布 GitHub Release（可直下 IPA）
+      # 发布 Release（便利通道，不是构建的必要环节）。
+      # 历史教训：GitHub 的 GITHUB_TOKEN 即使已授予 contents:write，
+      # 创建 Release 时仍会**间歇性** 403 "Resource not accessible by
+      # integration"，把构建全绿的 job 拖成 failure（run 37841469025 /
+      # 37844039536）。因此这里 continue-on-error，并回退到 RELEASE_TOKEN。
+      - name: 发布 GitHub Release（softprops）
+        id: release
         if: success()
+        continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ios14-test-${{ github.run_number }}
@@ -133,4 +141,20 @@ jobs:
             dist/ipa-inspection.json
           fail_on_unmatched_files: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+      # 回退：RELEASE_TOKEN 直连 REST API（仅当上一步失败且 token 存在）。
+      # 历史教训：GITHUB_TOKEN 即使授予 contents:write 也会**间歇性** 403
+      # "Resource not accessible by integration"，导致构建全绿的 job 被误判失败。
+      - name: 回退发布（REST API）
+        if: success() && steps.release.outcome == 'failure'
+        continue-on-error: true
+        shell: bash
+        env:
+          REL_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          REL_TAG: ios14-test-${{ github.run_number }}
+          REL_SHA: ${{ github.sha }}
+          REL_REF: ${{ github.ref_name }}
+          REL_RUN: ${{ github.run_number }}
+          REL_REPO: ${{ github.repository }}
+          REL_IPA: ${{ env.RELEASE_IPA_NAME }}
+        run: bash .github/scripts/publish_release.sh

@@ -32,7 +32,7 @@
   `127.0.0.1:<port>` → 两个通道都走本地 DoH ✅
 - **iOS 14**：无此 API → 只能让**两个通道经由同一上游**达到出口 IP 一致。
 
-### C1（首选）核实 DoH 出站是否跟随系统代理
+### C1（首选）核实 DoH 出站是否跟随系统代理 —— ✅ 已修复（2026-10-09 07:00 CST）
 
 `GatewayUpstream.resolve()` 的优先级为「应用内代理 > 系统代理 > 直连」，
 且 `_applyProxyState()` 里 **只在 `Platform.isWindows` 时**把
@@ -50,11 +50,31 @@ final upstream = GatewayUpstream.resolve(
 → **iOS 上系统代理没有传给 Rust 网关**。虽然 `SystemProxyReader` 已能读，
 虽然 `rhttp` 已跟随系统代理，但**本地 DoH 代理的出站**未必跟随。
 
-**下一轮动作**：确认 iOS 上 DoH 出站的真实路径。
-- 若 DoH 出站为直连 → WebView 经系统代理、Dio 经 DoH 直连，**出口仍不一致**
-  → 需要把 `effectiveProxyUrl` 在 iOS 也传给 `GatewayUpstream.resolve`
-  （使 DoH 出站也经系统代理），从而两个通道出口一致。
-- 注意：此处改动会影响 iOS 的**全部** DoH 流量，属行为变更，需要真机验证。
+**结论（已核实并修复）**：iOS 上 DoH 出站**原本直连**——`_applyProxyState()`
+里 `systemProxyUrl` 只在 `Platform.isWindows` 时传入，iOS 恒传 `null`，
+于是 `GatewayUpstream.resolve()` 直接走「直连」分支。这就造成：
+
+| 通道 | iOS 14 出站 |
+|---|---|
+| WKWebView（内部浏览器） | 系统代理（CFNetwork 栈） |
+| Rust DoH 网关（Dio/rhttp 出口） | **直连** ← 不一致的根源 |
+
+**已实施修复**（commit 见下）：新增 `_systemProxyUrlForGateway()`，
+让 **Windows 与 iOS** 都把 `SystemProxyService.instance.effectiveProxyUrl`
+交给网关，使 DoH 出站与 WKWebView 走**同一出口**。
+
+```dart
+final upstream = GatewayUpstream.resolve(
+  applicationProxy: _proxyService.current,
+  systemProxyUrl: _systemProxyUrlForGateway(),
+);
+```
+
+优先顺序不变：应用内代理 > 系统代理 > 直连。VPN/TUN 模式下系统不写代理，
+两者都经 TUN，天然一致（helper 返回 null，与原先等价）。
+`test/services/network/gateway_system_proxy_source_test.dart` 锁死该优先级契约。
+
+**待真机验证**：iOS 14.8 实机 HTTP(S) 代理下，DoH 出站与 WebView 出口 IP 应一致。
 
 ### C2（备选）iOS 进程内代理写入
 
