@@ -85,6 +85,27 @@ class CfClearanceRefreshService {
   Timer? _scrollPauseTicker;
   bool _webViewPausedForScroll = false;
 
+  /// iOS 的择时销毁状态机(仅 iOS)。
+  ///
+  /// Turnstile 常驻 WebView 的 JS(api.js 心跳 + widget 定时器)是老设备
+  /// 发烫的主因,而 cf_clearance 续期的**主路径是事件驱动**(load_stop /
+  /// turnstile_token / expired / error 信号即时触发同步),常驻实例在
+  /// 「无事发生」的间隙里纯烧 CPU、不产生价值。iOS 没有可用的实例级挂起
+  /// (pauseTimers 靠 alert 阻塞整个 WebContent,会让手动验证页白屏),故用
+  /// 销毁换省电:进后台立即销毁(见 [pause]),前台静默超过
+  /// [_iosIdleDisposeDelay] 也销毁(见 [_armIdleDisposeTimer]),下次需要时
+  /// 由既有事件/请求路径按需重建。
+  ///
+  /// 该手段只释放 WebView,不调用任何 pause/挂起 API,不会阻塞 JS 执行;
+  /// 唯一风险是「销毁时刚好错过一次 token 续期」,由 [_minTtlBeforeIdleDispose]
+  /// 兜底——离绝对过期不足该时长时不做空闲销毁。
+  Timer? _iosIdleDisposeTimer;
+  static const Duration _iosIdleDisposeDelay = Duration(minutes: 5);
+  static const Duration _minTtlBeforeIdleDispose = Duration(minutes: 2);
+
+  /// 是否走「择时销毁」而不是「保留实例」的省电路径(仅 iOS)。
+  bool get _shouldDisposeOnBackground => io.Platform.isIOS;
+
   /// [webViewController] 实际进入了挂起态。与 [_webViewPausedForScroll] 区别在于
   /// 后者是「期望挂起」,本字段是「已确认平台调用成功」。实例销毁/重建时用它
   /// 判断是否需要兜底 resume,避免把上一实例的阻塞态留给新实例。
@@ -161,13 +182,34 @@ class CfClearanceRefreshService {
     _startWebView();
   }
 
-  /// 暂停：应用进后台时只停止维护任务，保留同一个 Headless WebView。
+  /// 暂停：应用进后台时停止维护任务。
   ///
   /// Windows WebView2 的创建/销毁与主窗口共用平台消息线程。前后台切换如果
   /// 每次都 dispose/recreate，会放大原生生命周期竞态，甚至造成窗口无响应。
+  /// 所以非 iOS 路径只停计时器、保留同一个 Headless WebView。
+  ///
+  /// **iOS 例外：销毁式省电**。iOS 上常驻 Turnstile 是活网页，其 JS 定时器
+  /// 把平台主线程烧到 60%+ 单核——这正是老设备发烫的主因；而 iOS 又没有安全
+  /// 的实例级挂起可用（`pauseTimers()` 靠 `evaluateJavaScript("alert();")`
+  /// 阻塞整个 WebContent 进程，会让手动验证页白屏，见文件头禁用说明）。故
+  /// iOS 进后台直接销毁常驻 WebView：销毁只释放 JS 环境与 IPC，不阻塞任何
+  /// 页面脚本；回前台时 [resume] 按「有期望没实例」的既有分支重建。
   void pause() {
     _isForeground = false;
     if (!_shouldBeRunning && !_isRunning && !_isDisposing) return;
+    if (_shouldDisposeOnBackground) {
+      _pausedByLifecycle = false;
+      _cancelDelayedTimers();
+      _cancelRuntimeTimers();
+      CfChallengeLogger.log('[CfRefresh] iOS 进后台：销毁常驻 WebView 停止 JS 燃烧');
+      if (_isRunning ||
+          _headlessWebView != null ||
+          _webViewController != null) {
+        _generation++;
+        unawaited(_disposeWebView(reason: 'lifecycle_background'));
+      }
+      return;
+    }
     _pausedByLifecycle = true;
     _cancelDelayedTimers();
     _cancelRuntimeTimers();
@@ -402,6 +444,8 @@ class CfClearanceRefreshService {
         if (!_canHandleGeneration(gen)) return null;
         _lastSignalAt = DateTime.now();
         _cancelInitialTimer();
+        // Turnstile 刚出 token = 刚活动过,重置 iOS 闲置销毁计时。
+        _armIdleDisposeTimer(gen);
         final tokenLength = _readInt(args, 'length');
         CfChallengeLogger.log(
           '[CfRefresh] Turnstile token 回调 len=$tokenLength',
@@ -647,6 +691,11 @@ document.close();
       }
     });
 
+    // iOS 择时销毁:前台静默超过阈值且离过期还早时,销毁常驻 WebView 停止
+    // 无意义的 JS 燃烧(见 [_iosIdleDisposeTimer] 字段注释)。这不是暂停/挂起,
+    // 只释放实例、不触碰 JS 执行,故不会重演 pauseTimers 白屏回归。
+    _armIdleDisposeTimer(gen);
+
     // 滚动窗口内把 headless WebView 挂起(仅 Android,onPause:暂停 JS
     // 定时器与渲染,不销毁实例):Turnstile 是活网页,常驻 JS 把平台主线程
     // 烧到 60%+ 单核(生产 CPU 采样),而 vsync 分发/触摸事件与其同线程。
@@ -760,6 +809,8 @@ document.close();
         _cancelInitialTimer();
         _consecutiveFailures = 0;
         _staleReloads = 0;
+        // cookie 有前进 = 刚发生过真实续期活动,重置 iOS 闲置销毁计时。
+        _armIdleDisposeTimer(gen);
         CfChallengeLogger.log(
           '[CfRefresh] cf_clearance 已更新: reason=$reason '
           'expires=${snapshot.expiresAt?.toIso8601String() ?? '-'}',
@@ -907,6 +958,38 @@ document.close();
     _initialTimer = null;
   }
 
+  /// 重置 iOS 闲置销毁计时器(仅 iOS,其它平台 no-op)。
+  ///
+  /// 每次「有活动」都调用:定时器建立时、Turnstile 信号到达时、cookie 前进时。
+  /// 到期时若仍无新活动且离过期还早,就销毁常驻 WebView 省电;之后由既有
+  /// 事件路径(下个请求撞盾 / 前台恢复 / 显式 start)按需重建。
+  void _armIdleDisposeTimer(int gen) {
+    _iosIdleDisposeTimer?.cancel();
+    _iosIdleDisposeTimer = null;
+    if (!_shouldDisposeOnBackground) return;
+    // 首次验证还没拿到 token(_initialTimer 仍在)时不能销毁,否则会把
+    // 首次验证拖到超时误判重建。
+    if (_initialTimer != null) return;
+    _iosIdleDisposeTimer = Timer(_iosIdleDisposeDelay, () {
+      if (!_canHandleGeneration(gen)) return;
+      // 离绝对过期不足兜底窗口时不做空闲销毁:此刻销毁很可能错过下一次
+      // token 续期,反而把「省电」变成「多一个过期→重载周期」。
+      final expiresAt = _lastCookieExpiresAt;
+      if (expiresAt != null) {
+        final ttl = expiresAt.difference(DateTime.now());
+        if (ttl <= _minTtlBeforeIdleDispose) {
+          CfChallengeLogger.log(
+            '[CfRefresh] iOS 空闲但离过期仅 ${ttl.inSeconds}s，跳过闲置销毁',
+          );
+          return;
+        }
+      }
+      CfChallengeLogger.log('[CfRefresh] iOS 前台闲置超时，销毁常驻 WebView 省电');
+      _generation++;
+      unawaited(_disposeWebView(reason: 'ios_idle_dispose'));
+    });
+  }
+
   void _cancelRuntimeTimers() {
     _initialTimer?.cancel();
     _initialTimer = null;
@@ -916,6 +999,8 @@ document.close();
     _healthTimer = null;
     _scrollPauseTicker?.cancel();
     _scrollPauseTicker = null;
+    _iosIdleDisposeTimer?.cancel();
+    _iosIdleDisposeTimer = null;
     // 旧实例的挂起态随销毁消失;新实例从 resumed 起步
     _webViewPausedForScroll = false;
   }
