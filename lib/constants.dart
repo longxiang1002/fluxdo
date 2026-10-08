@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -25,6 +26,11 @@ class AppConstants {
   /// macOS Safari 真实版本号（从 /Applications/Safari.app 读取），
   /// 用于补齐 WKWebView 默认 UA 缺失的 `Version/x.y`。
   static String? _cachedMacSafariVersion;
+
+  /// iOS 系统真实版本号（如 14.8 / 18.3.1），从 device_info 读取。
+  /// 用于降级/默认 UA 路径，避免假报 iOS 18_0 与真实 WebView 指纹不一致
+  /// 而被 Cloudflare 判定可疑（目标设备 iOS 14.8）。
+  static String? _cachedIosSystemVersion;
 
   /// 与原生层通信的系统信息 channel（目前只有 macOS 用到）
   static const MethodChannel _systemInfoChannel = MethodChannel('com.fluxdo/system_info');
@@ -68,6 +74,17 @@ class AppConstants {
         // macOS WKWebView 默认 UA 缺 Version/x.y 和 Safari/，sanitize 时要补；
         // 这里先读真实 Safari 版本号缓存住。
         _cachedMacSafariVersion = await _readMacSafariVersion();
+      }
+      if (Platform.isIOS) {
+        // 预读真实 iOS 系统版本（降级路径/默认 UA 用它，不假报 18_0）。
+        try {
+          final info = await DeviceInfoPlugin().iosInfo;
+          final v = info.systemVersion.trim();
+          if (v.isNotEmpty) _cachedIosSystemVersion = v;
+          debugPrint('[AppConstants] iOS system version: $_cachedIosSystemVersion');
+        } catch (e) {
+          debugPrint('[AppConstants] 读取 iOS 系统版本失败: $e');
+        }
       }
       final webViewUA = await InAppWebViewController.getDefaultUserAgent();
       // 清理 UA，使其看起来像普通浏览器
@@ -276,8 +293,20 @@ class AppConstants {
           '(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
     }
     if (Platform.isIOS) {
-      return 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) '
-          'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 '
+      // iOS 降级/默认路径：用真实系统版本构造 UA，不再假报 iOS 18_0。
+      // CF 会比对 Sec-CH-UA / navigator.userAgent / WKWebView 真实 UA，
+      // 假版本会与设备指纹不一致（目标设备 iOS 14.8）→ 加重过盾。
+      // 真实 Safari 的 Version/ 只有 major.minor 两段，不跟补丁号。
+      final sys = _cachedIosSystemVersion;
+      String osVer = '14.8';
+      String version = '14.8';
+      if (sys != null && sys.isNotEmpty) {
+        final parts = sys.split('.');
+        osVer = parts.length >= 2 ? '${parts[0]}_${parts[1]}' : parts[0];
+        version = parts.length >= 2 ? '${parts[0]}.${parts[1]}' : parts[0];
+      }
+      return 'Mozilla/5.0 (iPhone; CPU iPhone OS $osVer like Mac OS X) '
+          'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/$version '
           'Mobile/15E148 Safari/604.1';
     }
     if (Platform.isWindows) {
