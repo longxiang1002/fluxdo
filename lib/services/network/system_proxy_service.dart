@@ -46,9 +46,38 @@ class SystemProxyService {
   bool _started = false;
 
   /// 当前系统代理地址(已启用的固定代理),未启用时为 null。
+  ///
+  /// 已启用固定代理 → 返回代理地址(Dio 跟随,与 WebView 保持同一出口);
+  /// 代理进程若已死,请求显式失败(与 WebView 一致),不做可达性探测——
+  /// 探测无法区分翻墙代理与校园网等普通代理,不能作为任何语义判定依据。
+  ///
+  /// 返回前做**格式校验**([sanitizeProxyUrl]):原生侧已过滤非法值,这里再
+  /// 兜一层,避免把畸形 URL 透传给 rhttp/Dio 导致全部请求挂死
+  /// (历史教训:iOS 系统代理误读 → 全站白屏)。
   String? get effectiveProxyUrl {
     _ensureStarted();
-    return _effectiveProxyUrl;
+    return sanitizeProxyUrl(_effectiveProxyUrl);
+  }
+
+  /// 校验并规范化系统代理 URL;非法时返回 null(调用方退化为直连)。
+  ///
+  /// 只接受 `http://host:port`(CFNetwork/注册表里固定代理必为 HTTP 型),
+  /// host 非空、port 在 1..65535、不含 userInfo;socks 由上游代理设置单独
+  /// 处理,系统代理不承载。回环地址不在此拦截(本地代理如 Clash 常监听
+  /// 127.0.0.1,是合法配置),由调用方按是否回环决定是否直连。
+  @visibleForTesting
+  static String? sanitizeProxyUrl(String? raw) {
+    if (raw == null) return null;
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return null;
+    final u = Uri.tryParse(trimmed);
+    if (u == null) return null;
+    if (u.scheme != 'http') return null;
+    if (u.host.isEmpty) return null;
+    if (u.userInfo.isNotEmpty) return null;
+    if (!u.hasPort) return null;
+    if (u.port <= 0 || u.port > 65535) return null;
+    return 'http://${u.host}:${u.port}';
   }
 
   /// 注册表层面的系统代理配置(仅 Windows 有意义),供诊断 UI 展示。

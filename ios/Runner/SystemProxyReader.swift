@@ -11,6 +11,15 @@ import Foundation
 ///
 /// 仅返回固定 HTTP/HTTPS 代理；PAC / 自动代理脚本不做原生侧求值，
 /// 未配置固定代理时返回 nil（与 Windows 注册表读取同策略）。
+///
+/// ⚠️ iOS 特别说明：
+/// - `kCFNetworkProxiesHTTPSEnable/HTTPSProxy/HTTPSPort` 是 macOS-only 常量，
+///   iOS 上引用会编译报 unavailable；这里改用其等值的字符串字面量（CFNetwork
+///   代理字典标准 key），iOS/macOS 均可编译。
+/// - 仅在 `*Enable == true` 且 host 非空、port 合法时才返回。未配置代理时
+///   CFNetwork 字典里根本不带这些键，因此返回 nil → 直连，不会误判。
+/// - 只接受 `http://` scheme（NSDictionary 里的代理必然是 HTTP CONNECT 型，
+///   不存在 socks 声明），避免把非法值传给 rhttp/Dio 造成请求全挂。
 @objc class SystemProxyReader: NSObject {
   @objc static let shared = SystemProxyReader()
 
@@ -22,10 +31,6 @@ import Foundation
       return nil
     }
 
-    // 注意：kCFNetworkProxiesHTTPSEnable/HTTPSProxy/HTTPSPort 是 macOS-only
-    // API，iOS 上编译报 unavailable。这里使用与之等值的字符串字面量（CFNetwork
-    // 代理字典的标准 key），iOS/macOS 均可编译；iOS 系统代理通常只填 HTTP key，
-    // HTTPS key 未配置时自然回落到 HTTP 分支，行为不变。
     if let https = proxyEntry(
       settings,
       enabledKey: "HTTPSEnable",
@@ -48,11 +53,17 @@ import Foundation
     hostKey: String,
     portKey: String
   ) -> String? {
-    guard let enabled = settings[enabledKey] as? Bool, enabled,
-          let host = settings[hostKey] as? String, !host.isEmpty,
-          let port = settings[portKey] as? Int, port > 0 else {
+    // enabled 可能是 Bool 或 NSNumber(1/0)，两种都接受；只有明确为真才继续。
+    let enabled = (settings[enabledKey] as? Bool)
+      ?? ((settings[enabledKey] as? NSNumber)?.boolValue ?? false)
+    guard enabled,
+          let host = settings[hostKey] as? String,
+          !host.isEmpty,
+          host != "0.0.0.0",
+          let portNumber = settings[portKey] as? NSNumber,
+          portNumber.intValue > 0, portNumber.intValue <= 65535 else {
       return nil
     }
-    return "http://\(host):\(port)"
+    return "http://\(host):\(portNumber.intValue)"
   }
 }
