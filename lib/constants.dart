@@ -81,7 +81,9 @@ class AppConstants {
           final info = await DeviceInfoPlugin().iosInfo;
           final v = info.systemVersion.trim();
           if (v.isNotEmpty) _cachedIosSystemVersion = v;
-          debugPrint('[AppConstants] iOS system version: $_cachedIosSystemVersion');
+          debugPrint(
+            '[AppConstants] iOS system version: $_cachedIosSystemVersion',
+          );
         } catch (e) {
           debugPrint('[AppConstants] 读取 iOS 系统版本失败: $e');
         }
