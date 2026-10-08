@@ -101,3 +101,25 @@ jobs:
             dist/ipa-inspection.json
           if-no-files-found: ignore
           retention-days: 7
+      - name: 发布 GitHub Release（可直下 IPA）
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ios14-test-${{ github.run_number }}
+          name: iOS14 test build (ios14-test-${{ github.run_number }})
+          body: |
+            自动发布的 iOS14 测试包（无签名，TrollStore 安装）。
+            - commit: ${{ github.sha }}
+            - 分支: ${{ github.ref_name }}
+            - 构建: GitHub Actions run #${{ github.run_number }}
+            - 下载: fluxdo-ios14-test-unsigned.ipa
+          prerelease: true
+          files: |
+            dist/fluxdo-ios14-test-unsigned.ipa
+            dist/SHA256SUMS.txt
+            dist/build-info.txt
+            dist/ios14-validation.md
+            dist/ipa-inspection.json
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
