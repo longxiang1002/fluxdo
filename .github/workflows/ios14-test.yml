@@ -101,6 +101,17 @@ jobs:
             dist/ipa-inspection.json
           if-no-files-found: ignore
           retention-days: 7
+      - name: 为 Release 重命名 IPA（带版本号+commit，便于本地区分）
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHORT=$(echo "${{ github.sha }}" | cut -c1-8)
+          NEWNAME="fluxdo-ios14-test-${{ github.run_number }}-${SHORT}.ipa"
+          cp "dist/fluxdo-ios14-test-unsigned.ipa" "dist/${NEWNAME}"
+          rm -f "dist/fluxdo-ios14-test-unsigned.ipa"
+          echo "RELEASE_IPA_NAME=${NEWNAME}" >> "$GITHUB_ENV"
+          echo "重命名后: ${NEWNAME}"
       - name: 发布 GitHub Release（可直下 IPA）
         if: success()
         uses: softprops/action-gh-release@v2
@@ -112,10 +123,10 @@ jobs:
             - commit: ${{ github.sha }}
             - 分支: ${{ github.ref_name }}
             - 构建: GitHub Actions run #${{ github.run_number }}
-            - 下载: fluxdo-ios14-test-unsigned.ipa
+            - 下载: ${{ env.RELEASE_IPA_NAME }}
           prerelease: true
           files: |
-            dist/fluxdo-ios14-test-unsigned.ipa
+            dist/${{ env.RELEASE_IPA_NAME }}
             dist/SHA256SUMS.txt
             dist/build-info.txt
             dist/ios14-validation.md
