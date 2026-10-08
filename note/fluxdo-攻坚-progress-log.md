@@ -33,3 +33,23 @@ parse-only = total_errors=0 ✅。
 - 路径 C1：核实 iOS 上 DoH 出站是否经系统代理
   （`_applyProxyState()` 里 `GatewayUpstream.resolve(systemProxyUrl:)` 在 iOS 传的是
   `null`，只有 Windows 才传 `SystemProxyService.effectiveProxyUrl`）。
+
+## 2026-10-09 06:00 CST | 遗留 CI 断点关闭
+
+run `37838762957`（commit `b1a5e341`，iOS 销毁式省电）经 jobs API 核对：
+- step 7 格式与静态分析 ✅ / step 8 iOS14 兼容与 CF 回归 ✅
+- **step 9 构建未签名 IPA ✅ / step 10 上传已检查的测试包 ✅** —— 全绿，断点关闭。
+
+## 2026-10-09 06:00 CST | 本轮 CI
+
+- commit `0c7aad6d` → run `37844039536`（05:03 CST 触发，pending）
+- 另一 run `37841469025`（commit `58a2411e`，上轮发布流程改动）仍 in_progress
+
+## 2026-10-09 06:00 CST | 轮内 CI 核对（诚实标注：未出结论）
+
+轮内多次轮询 run `37844039536`（commit `0c7aad6d`）：**始终 pending**，
+GitHub 侧尚未分配 runner（本轮 25min 预算内未进入 build）。
+另一 run `37841469025`（commit `58a2411e`）为 in_progress。
+
+→ 本地已过 `dart format`（0 changed）与 parse-only（total_errors=0）。
+**下一轮第一件事**：核对 `37844039536` 的 step 7/8/9/10 与是否出 IPA。
