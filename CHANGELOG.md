@@ -2,6 +2,28 @@
 
 所有版本的变更记录。beta / rc 版本提交在 stable 发版时会折叠并入对应 stable 版本。
 
+## [ios14-fix] - 2026-10-08（测试分支 `fix/ios14-network-thermal`）
+
+> 面向 iOS 14.8 老设备：不引入 iOS 15+ API，解决发烫与频繁过盾。
+> 里程碑与逐项证据见 `docs/ios14-network-thermal-milestone.md`。
+
+### 🐛 修复
+
+- **iOS 禁用滚动挂起**：`pauseTimers()` 在 iOS 上的实现是 `evaluateJavaScript("alert();")`，
+  未决 `alert()` 会阻塞整个 WebContent 进程，导致同进程内的**手动验证弹窗白屏**。
+  现 iOS 彻底禁用滚动挂起（仅 Android 保留 `pause()`/`resume()`） by @default
+- iOS 系统代理读取加固：`NSNumber` 解析端口 + host/port 合法性校验；
+  macOS-only 常量改等值字符串字面量以兼容 iOS 编译 by @default
+- 新增 `sanitizeProxyUrl`，`effectiveProxyUrl` 返回前校验格式，避免坏代理拖垮全站 by @default
+
+### 🔧 变更
+
+- iOS UA 对齐真实系统版本（14.8），Dio UA 与 WKWebView 指纹一致 by @default
+- 新增 iOS 系统代理读取（`CFNetworkCopySystemProxySettings`）与 `com.fluxdo/system_proxy` 通道，
+  rhttp 未配上游时跟随系统代理，与 WKWebView 保持同一出口 by @default
+- retry 仍收到 403/429 时，只读数据请求自动切换 session WebView 网络栈重放，
+  不再弹出兼容确认框；写操作仍保留一次性确认 by @default
+
 ## [0.2.28] - 2026-09-04
 
 
