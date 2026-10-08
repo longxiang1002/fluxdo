@@ -783,10 +783,7 @@ class NetworkSettingsService {
       return;
     }
 
-    // macOS 14 以下 / iOS 17 以下调用 setProxyOverride 可能报错
-    if (!Platform.isAndroid &&
-        !await _isMacOS14OrAbove() &&
-        !await _isiOS17OrAbove()) {
+    if (await _requiresUnsupportedProxySkips()) {
       return;
     }
 
@@ -801,6 +798,49 @@ class NetworkSettingsService {
     } catch (e) {
       debugPrint('[DOH] WebView 代理设置失败: $e');
     }
+  }
+
+  /// 当前平台是否**无法**通过 `ProxyController.setProxyOverride` 接管 WebView。
+  ///
+  /// 这不是「可能报错」的保守判断，而是**能力上的硬缺失**，已源码级核实：
+  ///
+  /// - iOS < 17：`ProxyManager` 全程标注 `@available(iOS 17.0, *)`，且
+  ///   `InAppWebViewFlutterPlugin` 只在 `if #available(iOS 17.0, *)` 分支里
+  ///   注册它 → iOS 14 上 `...proxycontroller` MethodChannel **从未注册**，
+  ///   Dart 侧 `invokeMethod` 抛 `MissingPluginException`（会被下面的 catch 吞掉）。
+  ///   底层依赖 `WKWebsiteDataStore.proxyConfigurations`，该 API iOS 17 才引入。
+  /// - macOS < 14：同上，`proxyConfigurations` 为 macOS 14 才可用。
+  /// - 其余平台（Android）`setProxyOverride` 走原生 `WebView.setProxyOverride`，
+  ///   一直可用。
+  ///
+  /// 因为此前这里是**静默 return**，真机排查时会误以为「设置成功但没用」。
+  /// 现在显式打日志，让日志本身能证明「iOS 14 内部浏览器是裸连、未走 DoH」。
+  ///
+  /// 注意：iOS 上也没有替代拦截手段 —— `shouldInterceptRequest` 的
+  /// `@SupportedPlatforms` 只列 Android/Windows/Linux（iOS 原生实现为 0 处），
+  /// `CustomSchemeHandler` 只对自定义 scheme 生效、接管不了 `https://`。
+  /// 因此 iOS 14 的 WebView 出口一致性只能走「系统代理」路径（见
+  /// `SystemProxyReader` / `SystemProxyService`），不能在本函数里解决。
+  Future<bool> _requiresUnsupportedProxySkips() async {
+    if (Platform.isAndroid) return false;
+
+    if (Platform.isIOS) {
+      if (await _isiOS17OrAbove()) return false;
+      debugPrint(
+        '[DOH] iOS < 17 无 WKWebsiteDataStore.proxyConfigurations，'
+        'WebView 无法接管 → 内部浏览器流量裸连（不走本地 DoH 代理）',
+      );
+      return true;
+    }
+
+    if (Platform.isMacOS) {
+      if (await _isMacOS14OrAbove()) return false;
+      debugPrint('[DOH] macOS < 14 不支持 proxyConfigurations，WebView 无法接管');
+      return true;
+    }
+
+    // 其余平台（Windows 已在前面 return，Linux 无该系统代理 API）
+    return true;
   }
 
   Future<bool> _clearWebViewProxy() async {
@@ -821,9 +861,8 @@ class NetworkSettingsService {
 
     if (!_webViewProxySet) return true;
 
-    if (!Platform.isAndroid &&
-        !await _isMacOS14OrAbove() &&
-        !await _isiOS17OrAbove()) {
+    // 与 _applyWebViewProxy 同一能力判断：不支持时无需也无法清除。
+    if (await _requiresUnsupportedProxySkips()) {
       return true;
     }
     try {
