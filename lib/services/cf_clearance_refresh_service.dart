@@ -79,7 +79,7 @@ class CfClearanceRefreshService {
   Timer? _delayedRestartTimer;
   Timer? _delayedStopTimer;
 
-  /// 滚动挂起状态机(仅 Android):500ms 检查一次滚动繁忙信号,
+  /// 滚动挂起状态机(Android/iOS):500ms 检查一次滚动繁忙信号,
   /// 见 [_updateScrollPause]
   Timer? _scrollPauseTicker;
   bool _webViewPausedForScroll = false;
@@ -635,12 +635,12 @@ document.close();
     });
 
     // 滚动窗口内把 headless WebView 挂起(Android onPause:暂停 JS 定时
-    // 器与渲染,不销毁实例):Turnstile 是活网页,常驻 JS 把平台主线程
-    // 烧到 60%+ 单核(生产 CPU 采样),而 vsync 分发/触摸事件与其同
-    // 线程。滚动繁忙即挂起、静默 ~1s 后恢复,JS 信号与刷新逻辑 resume
-    // 后自然补上。初始 Turnstile 运行期(_initialTimer 未清)只恢复不
-    // 挂起,避免把首次验证拖到超时误判重建。
-    if (io.Platform.isAndroid) {
+    // 器与渲染,不销毁实例;iOS 用 pauseTimers,阻塞 JS 定时器):Turnstile
+    // 是活网页,常驻 JS 把平台主线程烧到 60%+ 单核(生产 CPU 采样),而
+    // vsync 分发/触摸事件与其同线程。滚动繁忙即挂起、静默 ~1s 后恢复,
+    // JS 信号与刷新逻辑 resume 后自然补上。初始 Turnstile 运行期
+    // (_initialTimer 未清)只恢复不挂起,避免把首次验证拖到超时误判重建。
+    if (io.Platform.isAndroid || io.Platform.isIOS) {
       _scrollPauseTicker = Timer.periodic(const Duration(milliseconds: 500), (
         _,
       ) {
@@ -653,9 +653,18 @@ document.close();
     }
   }
 
-  /// 滚动繁忙 ↔ 静默的 WebView 挂起切换(仅 Android,由
-  /// [_scrollPauseTicker] 驱动)。pause/resume 是单实例 onPause/onResume,
-  /// 一次轻量平台调用;失败时复位标记,避免卡死在挂起态。
+  /// 滚动繁忙 ↔ 静默的 WebView 挂起切换(Android/iOS,由
+  /// [_scrollPauseTicker] 驱动)。
+  ///
+  /// - Android: [InAppWebViewController.pause]/[InAppWebViewController.resume]
+  ///   为 onPause/onResume,一次轻量平台调用。
+  /// - iOS/WKWebView: 插件不支持 pause()(会抛 UnimplementedError,见
+  ///   flutter_inappwebview 的 @SupportedPlatforms),等价省电位是
+  ///   [InAppWebViewController.pauseTimers]/[InAppWebViewController.resumeTimers]:
+  ///   在页面执行 alert() 阻塞 JS 定时器;挂起期间的 alert 回调会被 WebView
+  ///   暂存(isPausedTimersCompletionHandler),不会弹真实对话框,恢复后放行。
+  ///
+  /// 失败时复位标记,避免卡死在挂起态。
   Future<void> _updateScrollPause() async {
     final controller = _webViewController;
     if (controller == null) return;
@@ -664,10 +673,19 @@ document.close();
     try {
       if (wantPause) {
         _webViewPausedForScroll = true;
-        await controller.pause();
+        if (io.Platform.isAndroid) {
+          await controller.pause();
+        } else {
+          // 仅 iOS 走到这里(Windows 在 start() 已整体禁用;Web 无 Dart io)。
+          await controller.pauseTimers();
+        }
       } else {
         _webViewPausedForScroll = false;
-        await controller.resume();
+        if (io.Platform.isAndroid) {
+          await controller.resume();
+        } else {
+          await controller.resumeTimers();
+        }
       }
     } catch (e) {
       _webViewPausedForScroll = false;
