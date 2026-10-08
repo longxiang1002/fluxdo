@@ -79,8 +79,9 @@ class CfClearanceRefreshService {
   Timer? _delayedRestartTimer;
   Timer? _delayedStopTimer;
 
-  /// 滚动挂起状态机(Android/iOS):500ms 检查一次滚动繁忙信号,
-  /// 见 [_updateScrollPause]
+  /// 滚动挂起状态机(仅 Android):500ms 检查一次滚动繁忙信号,
+  /// 见 [_updateScrollPause]。iOS 上禁用(pauseTimers 的 alert 阻塞会
+  /// 拖垮同进程其他 WebView → 验证页白屏)。
   Timer? _scrollPauseTicker;
   bool _webViewPausedForScroll = false;
 
@@ -646,13 +647,19 @@ document.close();
       }
     });
 
-    // 滚动窗口内把 headless WebView 挂起(Android onPause:暂停 JS 定时
-    // 器与渲染,不销毁实例;iOS 用 pauseTimers,阻塞 JS 定时器):Turnstile
-    // 是活网页,常驻 JS 把平台主线程烧到 60%+ 单核(生产 CPU 采样),而
-    // vsync 分发/触摸事件与其同线程。滚动繁忙即挂起、静默 ~1s 后恢复,
-    // JS 信号与刷新逻辑 resume 后自然补上。初始 Turnstile 运行期
-    // (_initialTimer 未清)只恢复不挂起,避免把首次验证拖到超时误判重建。
-    if (io.Platform.isAndroid || io.Platform.isIOS) {
+    // 滚动窗口内把 headless WebView 挂起(仅 Android,onPause:暂停 JS
+    // 定时器与渲染,不销毁实例):Turnstile 是活网页,常驻 JS 把平台主线程
+    // 烧到 60%+ 单核(生产 CPU 采样),而 vsync 分发/触摸事件与其同线程。
+    // 滚动繁忙即挂起、静默 ~1s 后恢复,JS 信号与刷新逻辑 resume 后自然补上。
+    // 初始 Turnstile 运行期(_initialTimer 未清)只恢复不挂起,避免把首次
+    // 验证拖到超时误判重建。
+    //
+    // iOS 不启用:插件在 iOS 上的等价实现 pauseTimers/resumeTimers 靠
+    // evaluateJavaScript("alert();") 阻塞 JS,而 WKWebView 的 alert 会
+    // 阻塞整个 WebContent 进程,导致同进程内其他 WebView(含用户手动验证
+    // 弹窗)一并卡死 → 验证页白屏。该交互危害远大于省电收益,故 iOS 上
+    // 直接不做滚动挂起(发热由 ticker 外的其他手段覆盖)。
+    if (io.Platform.isAndroid) {
       _scrollPauseTicker = Timer.periodic(const Duration(milliseconds: 500), (
         _,
       ) {
@@ -665,19 +672,17 @@ document.close();
     }
   }
 
-  /// 滚动繁忙 ↔ 静默的 WebView 挂起切换(Android/iOS,由
-  /// [_scrollPauseTicker] 驱动)。
+  /// 滚动繁忙 ↔ 静默的 WebView 挂起切换(仅 Android,由
+  /// [_scrollPauseTicker] 驱动)。pause/resume 是单实例 onPause/onResume,
+  /// 一次轻量平台调用;失败时复位标记,避免卡死在挂起态。
   ///
-  /// - Android: [InAppWebViewController.pause]/[InAppWebViewController.resume]
-  ///   为 onPause/onResume,一次轻量平台调用。
-  /// - iOS/WKWebView: 插件不支持 pause()(会抛 UnimplementedError,见
-  ///   flutter_inappwebview 的 @SupportedPlatforms),等价省电位是
-  ///   [InAppWebViewController.pauseTimers]/[InAppWebViewController.resumeTimers]:
-  ///   在页面执行 alert() 阻塞 JS 定时器;挂起期间的 alert 回调会被 WebView
-  ///   暂存(isPausedTimersCompletionHandler),不会弹真实对话框,恢复后放行。
-  ///
-  /// 失败时复位标记,避免卡死在挂起态。
+  /// iOS 不参与:插件在 iOS 上用 pauseTimers 实现等价省电,[其底层是
+  /// evaluateJavaScript("alert();")] 阻塞 JS,而 WKWebView 的 alert 会
+  /// 阻塞整个 WebContent 进程,同进程内其他 WebView(含用户手动验证弹窗)
+  /// 会一并卡死 → 白屏。故此处对 iOS 直接 no-op。
   Future<void> _updateScrollPause() async {
+    // 仅 Android 有可用的实例级挂起;iOS 直接返回,不触碰 platform 调用。
+    if (!io.Platform.isAndroid) return;
     final controller = _webViewController;
     if (controller == null) return;
     // 换过实例(重载/重建)后旧记账失效:上一次调用绑定的是旧 controller,
@@ -690,21 +695,12 @@ document.close();
     if (wantPause == _webViewPausedForScroll) return;
     try {
       if (wantPause) {
-        if (io.Platform.isAndroid) {
-          await controller.pause();
-        } else {
-          // 仅 iOS 走到这里(Windows 在 start() 已整体禁用;Web 无 Dart io)。
-          await controller.pauseTimers();
-        }
+        await controller.pause();
         // 平台调用成功后才记账,并绑定到实际被挂起的实例。
         _pausedController = controller;
         _webViewPausedForScroll = true;
       } else {
-        if (io.Platform.isAndroid) {
-          await controller.resume();
-        } else {
-          await controller.resumeTimers();
-        }
+        await controller.resume();
         _pausedController = null;
         _webViewPausedForScroll = false;
       }
@@ -714,26 +710,21 @@ document.close();
     }
   }
 
-  /// 销毁/重建前把挂起态放开。
+  /// 销毁/重建前把挂起态放开(仅 Android 会真正进入挂起态)。
   ///
-  /// iOS 的 [InAppWebViewController.pauseTimers] 是「执行 alert() 阻塞 JS」的
-  /// 实现,若实例在挂起态被替换,新实例并不会自动解除旧实例的阻塞(上游仅在
-  /// dispose 时 resume)。这里在换实例/停止前显式兜底 resume,确保 Turnstile
-  /// 的 JS 定时器不会永久停摆导致 cf_clearance 不再续期。
+  /// Android 的 pause/resume 是实例级 onPause/onResume;若实例在挂起态被
+  /// 替换,新实例不会自动解除旧实例的暂停。这里在换实例/停止前显式兜底
+  /// resume,确保 Turnstile 的 JS 定时器不会永久停摆导致 cf_clearance 不再续期。
+  /// (iOS 已不做滚动挂起,不会进入挂起态,故无需恢复。)
   Future<void> _releaseScrollPauseIfNeeded() async {
     final paused = _pausedController;
     _pausedController = null;
     _webViewPausedForScroll = false;
     if (paused == null) return;
+    if (!io.Platform.isAndroid) return;
     try {
-      if (io.Platform.isAndroid) {
-        await paused.resume();
-      } else {
-        await paused.resumeTimers();
-      }
-      CfChallengeLogger.log(
-        '[CfRefresh] 换实例/停止前已释放滚动挂起',
-      );
+      await paused.resume();
+      CfChallengeLogger.log('[CfRefresh] 换实例/停止前已释放挂起');
     } catch (e) {
       CfChallengeLogger.log('[CfRefresh] 释放滚动挂起失败(忽略): $e');
     }
