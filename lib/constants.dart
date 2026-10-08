@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:io';
+
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:ua_client_hints/ua_client_hints.dart';
+
 import 'config/site_customization.dart';
 import 'config/sites/linuxdo.dart';
 import 'services/windows_webview_environment_service.dart';
@@ -33,7 +35,9 @@ class AppConstants {
   static String? _cachedIosSystemVersion;
 
   /// 与原生层通信的系统信息 channel（目前只有 macOS 用到）
-  static const MethodChannel _systemInfoChannel = MethodChannel('com.fluxdo/system_info');
+  static const MethodChannel _systemInfoChannel = MethodChannel(
+    'com.fluxdo/system_info',
+  );
 
   /// 缓存的 Client Hints 请求头（仅移动端可用）
   static Map<String, String>? _cachedClientHints;
@@ -132,9 +136,7 @@ class AppConstants {
             );
             completer.complete(result?.toString());
           } catch (e) {
-            debugPrint(
-              '[AppConstants] 读取 WebView navigator.userAgent 失败: $e',
-            );
+            debugPrint('[AppConstants] 读取 WebView navigator.userAgent 失败: $e');
             completer.complete(null);
           }
         },
@@ -239,7 +241,9 @@ class AppConstants {
       sanitized = sanitized.replaceAll(RegExp(r'\s*Electron/[\d.]+'), '');
       if (!sanitized.contains('Safari/')) {
         // 从原始 UA 抓 AppleWebKit 版本号，真 Safari 里 Safari/<num> 永远等于 AppleWebKit/<num>
-        final webKitMatch = RegExp(r'AppleWebKit/([^\s]+)').firstMatch(sanitized);
+        final webKitMatch = RegExp(
+          r'AppleWebKit/([^\s]+)',
+        ).firstMatch(sanitized);
         final webKitVersion = webKitMatch?.group(1) ?? '605.1.15';
         final safariVersion = _cachedMacSafariVersion ?? '18.5';
         sanitized = '$sanitized Version/$safariVersion Safari/$webKitVersion';
@@ -254,7 +258,9 @@ class AppConstants {
   /// 读不到时返回 null，由 sanitize / fallback 处使用保守默认值。
   static Future<String?> _readMacSafariVersion() async {
     try {
-      final version = await _systemInfoChannel.invokeMethod<String>('getSafariVersion');
+      final version = await _systemInfoChannel.invokeMethod<String>(
+        'getSafariVersion',
+      );
       if (version == null || version.isEmpty) return null;
       debugPrint('[AppConstants] macOS Safari version: $version');
       return version;
