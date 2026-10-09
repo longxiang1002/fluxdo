@@ -63,13 +63,21 @@ import Foundation
     let probeURL = URL(string: "https://example.invalid/")!
     let systemProxyUrl = effectiveProxyUrl
 
-    // 第二个参数是 `CFDictionary?` 的 proxySettings（可空）。
-    // 显式声明为可选 `CFDictionary?` 再传 nil，既满足类型要求，
-    // 又让 CFNetwork 自行取当前进程生效的系统级代理配置。
-    // ⚠️ 切勿在此传 `kCFAllocatorDefault`（那是 CFAllocator，不是 CFDictionary，
-    //     CI 报 "Cannot convert value of type 'CFAllocator' to expected argument type
-    //     'CFDictionary'"）。allocator 用 CFNetwork 默认即可。
-    let proxySettings: CFDictionary? = nil
+    // 第二个参数是 **非可选** 的 `CFDictionary`（proxySettings）。
+    // ⚠️ 三次踩坑记录（每次都被 CI step 9 抓到，本地无 swiftc 无法预检）：
+    //   1) 传字面量 `nil` → "'nil' is not compatible with expected argument type
+    //      'CFDictionary'"（04:xx 轮）
+    //   2) 传 `kCFAllocatorDefault` → 那是 `CFAllocator` 不是设置字典，
+    //      "Cannot convert value of type 'CFAllocator' to expected argument type
+    //      'CFDictionary'"（11:00 轮）
+    //   3) 传显式 `CFDictionary?` 的 nil → 参数非可选，
+    //      "Value of optional type 'CFDictionary?' must be unwrapped to a value of
+    //      type 'CFDictionary'"（12:00 轮，run 37882148105）
+    // 结论：**形参非可选**，必须给一个真实的 proxySettings 字典。
+    // 语义上「等价于不指定设置」的做法是传一个 *EMPTY* 字典：CFNetwork 会回落到
+    // 进程/系统默认代理配置（与 CFNetworkCopySystemProxySettings 同源），
+    // 因此探针读到的仍是「本进程真实生效」的代理，正是本方法要取的证据。
+    let proxySettings = [String: Any]() as CFDictionary
     let entries = CFNetworkCopyProxiesForURL(probeURL as CFURL, proxySettings)
       .takeRetainedValue() as? [[String: Any]]
 
