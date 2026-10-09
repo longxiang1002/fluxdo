@@ -63,10 +63,12 @@ import Foundation
     let probeURL = URL(string: "https://example.invalid/")!
     let systemProxyUrl = effectiveProxyUrl
 
-    guard let entries = CFNetworkCopyProxiesForURL(
-      probeURL as CFURL,
-      nil
-    )?.takeRetainedValue() as? [[String: Any]] else {
+    // 第二个参数是 Autorelease 的 proxySettings；本项目一律用系统级设置，
+    // 传 kCFAllocatorDefault 交给 CFNetwork 自己取系统配置。
+    let entries = CFNetworkCopyProxiesForURL(probeURL as CFURL, kCFAllocatorDefault)
+      .takeRetainedValue() as? [[String: Any]]
+
+    guard let entries else {
       return [
         "count": 0,
         "systemProxyUrl": systemProxyUrl as Any,
