@@ -1054,7 +1054,7 @@ class NetworkSettingsService {
     );
     DohRouteDiagnostics.instance.setDohEgressVerified(verified);
     debugPrint(
-      '[DOH] 内部浏览器出口结论: state=${webViewProxyState} '
+      '[DOH] 内部浏览器出口结论: state=$webViewProxyState '
       'egressVerified=${verified ?? 'unknown'} '
       'gatewayMode=${isGatewayMode ? 'on' : 'off'} '
       'systemProxy=${probe?.systemProxyUrl ?? "none"} '
