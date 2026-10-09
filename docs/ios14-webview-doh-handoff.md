@@ -115,6 +115,69 @@ TrollStore 环境下可行性待评估）。**结论：不作为首选**。
 **剩余可行方向只有 C1**（DoH 出站跟随系统代理，让两通道出口 IP 一致），
 其成立前提由 `SystemProxyProbe.effectiveExitIsSystemProxy` 真机采样判定。
 
+### D 路径（`https` scheme handler）定论 —— 2026-10-09 10:00 CST 源码级 + Apple 文档级核实
+
+> 上表 B' 曾写「`CustomSchemeHandler` 只对自定义 scheme 生效」——**确证并升级为
+> 「系统层面不可能」，不再是「库没实现」**。从此该路径可以永久排除，不再重复调研。
+
+**结论：iOS 上任何 `WKWebView`（含 InAppWebView）都**不可能**通过
+`setURLSchemeHandler` 接管 `https` 流量。这是 WebKit 的硬约束，不是本库的缺陷。**
+
+证据 1（Apple 官方文档，`WKWebViewConfiguration.setURLSchemeHandler(_:forURLScheme:)`）：
+
+> It is a programmer error to register a handler for a scheme WebKit already
+> handles, such as `https`, and this method raises an **`NSException`**
+> (`invalidArgumentException`) if you try to do so.
+
+即：对 `https` 调该方法 → **直接抛 NSException 崩溃**，而非静默失败。
+
+证据 2（Dart 侧本库主动 assert 拦住，说明作者已知此约束）：
+
+```dart
+// flutter_inappwebview_platform_interface-1.4.0-beta.3/lib/src/in_app_webview/in_app_webview_settings.dart:3487
+//                                    （InAppWebViewSettings 与 PlatformInAppWebViewSettings 各一处）
+assert(
+  this.resourceCustomSchemes == null ||
+      (this.resourceCustomSchemes != null &&
+          !this.resourceCustomSchemes!.contains("http") &&
+          !this.resourceCustomSchemes!.contains("https")),
+);
+```
+
+证据 3（iOS 原生侧唯一的 scheme handler 装配点，直接透传、无过滤）：
+
+```swift
+// flutter_inappwebview_ios-1.2.0-beta.3/.../InAppWebView/InAppWebView.swift:703-706
+if #available(iOS 11.0, *) {
+    for scheme in settings.resourceCustomSchemes {
+        configuration.setURLSchemeHandler(CustomSchemeHandler(), forURLScheme: scheme)
+    }
+```
+
+→ 若绕过 Dart assert 把 `https` 塞进 `resourceCustomSchemes`，
+Swift 侧会原样调用 → 按证据 1 **抛 NSException 崩溃**。
+**因此绝不能尝试绕过该 assert。**
+
+证据 4（本库自带的判定入口，正好印证「WebKit 已处理的 scheme 不能注册」）：
+
+```swift
+// flutter_inappwebview_ios-1.2.0-beta.3/.../InAppWebView/InAppWebViewManager.swift:36-42
+case "handlesURLScheme":
+    ... result(WKWebView.handlesURLScheme(urlScheme))
+```
+
+`WKWebView.handlesURLScheme("https")` 恒为 `true` → `https` 属「WebKit 自己处理」，
+按证据 1 不可注册 handler。
+
+**路径 D 判决：❌ 永久排除。**
+`https` 在 iOS 14 上被 WebKit 独占，App 层**没有任何**可用挂载点
+（`shouldInterceptRequest` iOS 无实现、scheme handler 对 `https` 非法、
+`WKContentRuleList` 只阻断不改写、`proxyConfigurations` 是 iOS 17 API）。
+
+→ **iOS 14 上「WebView 请求交 Dart 侧经本地 DoH 代发」在架构上不成立**
+（需要一个能被 App 拦截的请求钩子，而 WebKit 不提供）。
+**剩余唯一路径仍只有 C1**（DoH 出站跟随系统代理 → 两通道出口 IP 一致）。
+
 ### 若无可用系统代理时的兜底方向（待评估，非本轮实施）
 
 前提：设备**没有**可用系统代理（PAC/直连），此时 C1 无法统一出口。
