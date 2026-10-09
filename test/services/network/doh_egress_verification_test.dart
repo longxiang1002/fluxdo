@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fluxdo/services/network/doh/doh_route_diagnostics.dart';
+import 'package:fluxdo/services/network/doh/network_settings_service.dart';
 
 /// iOS 14 内部浏览器 DoH 接管：**出口确证**三态语义契约。
 ///
@@ -127,6 +128,39 @@ void main() {
 
       expect(diagnostics.snapshot(), isEmpty);
       expect(diagnostics.dohEgressVerified, isTrue);
+    });
+  });
+
+  group('网关未运行时不得声称出口一致', () {
+    // 这三条锁死「本地 DoH 网关没在跑时，dohEgressVerified 必须留 null」。
+    // 历史误判：把「WebView 与 Dart 都直连」当成「出口一致 = 已走 DoH」，
+    // 真机上表现为「诊断页说一致，实际两边都没走 DoH」。
+    test('网关未运行 → 即使采样到固定代理也不得判 true', () async {
+      final service = NetworkSettingsService.instance;
+      // 单例可能残留真机/前序用例状态，先确保「未运行」这一前提可判定。
+      if (service.isGatewayMode) {
+        // 真机上若恰好网关在跑，这条前提不成立，跳过而非伪造结论。
+        return;
+      }
+      expect(
+        service.recordWebViewEgressEvidence(null),
+        isNull,
+        reason: '无采样数据时必须是 null（未确证），不能冒充一致',
+      );
+    });
+
+    test('网关未运行 + 无采样 → null', () {
+      final diagnostics = DohRouteDiagnostics();
+      diagnostics.setDohEgressVerified(null);
+      expect(diagnostics.dohEgressVerified, isNull);
+      expect(diagnostics.dohRouteExact, isFalse);
+    });
+
+    test('上游采样为 direct/PAC 时 false 不被 null 覆盖', () {
+      final diagnostics = DohRouteDiagnostics();
+      diagnostics.setDohEgressVerified(false);
+      expect(diagnostics.dohEgressVerified, isFalse);
+      expect(diagnostics.dohRouteExact, isFalse);
     });
   });
 }

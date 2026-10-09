@@ -82,6 +82,51 @@ iOS 无公开的 per-process 代理写入 API（`CFNetworkCopySystemProxySetting
 App 内改全局系统代理只能靠 VPN/`NEPacketTunnelProvider`（需额外 entitlement，
 TrollStore 环境下可行性待评估）。**结论：不作为首选**。
 
+### C2 细化（2026-10-09 09:00 CST 调研结论）
+
+| 手段 | 能否让 WebView 走本地 DoH | 证据 / 阻塞点 |
+|---|---|---|
+| WebView 指向 127.0.0.1 | ❌ | 需 `WKWebsiteDataStore.proxyConfigurations`，iOS 17 API |
+| `setProxyOverride` | ❌ | 同上层 API，iOS 14 原生侧未注册 MethodChannel |
+| `shouldInterceptRequest` | ❌ | iOS 无实现（@SupportedPlatforms 仅 Android/Win/Linux） |
+| `setURLSchemeHandler` | ❌ | 只接管自定义 scheme，拦不到 `https://` |
+| `WKContentRuleList` | ❌ | 只能**阻断**匹配 URL，不能改写成经本地代理 |
+| App 写全局系统代理 | ❌ | 无公开 API；`CFNetworkCopySystemProxySettings` 只读 |
+| `NEPacketTunnelProvider` | ✅ 理论可行 | 见下 |
+
+**`NEPacketTunnelProvider` 在 TrollStore 下的具体阻塞（已核实本仓库）**：
+
+1. **entitlement 缺失**：`ios/Runner/Runner.entitlements` 当前只有
+   `com.apple.developer.web-browser`（TrollStore 注入的，用于默认浏览器能力）；
+   **没有** `com.apple.developer.networking.networkextension`。
+2. **profile 缺失**：TrollStore 是**永久签名注入**，不经过 Apple provisioning；
+   `NEProfileIngestionPayload` / `NEPacketTunnelProvider` 需要有效 provisioning
+   profile 里带 networkextension entitlement，且由系统看门进程
+   `nesessionmanager` 校验签名。TrollStore 签名的 app **不会**被授予该 entitlement
+   → `NETunnelProviderManager.loadAllFromPreferences` 报
+   `NEVPNErrorConfigurationInvalid` / `permission denied`。
+3. **需要额外 target**：`NEPacketTunnelProvider` 必须独立 Extension target +
+   `NSExtensionPointIdentifier = com.apple.networkextension.packet-tunnel`，
+   当前工程无该 target。
+4. **系统级副作用**：一旦成立，TUN 会接管**全机**流量（含其它 App），远超
+   「让本 App WebView 走 DoH」的范围，需老板明确授权。
+
+→ **结论：C2/NEPacketTunnel 在 TrollStore 环境下不成立**（entitlement 拿不到）。
+**剩余可行方向只有 C1**（DoH 出站跟随系统代理，让两通道出口 IP 一致），
+其成立前提由 `SystemProxyProbe.effectiveExitIsSystemProxy` 真机采样判定。
+
+### 若无可用系统代理时的兜底方向（待评估，非本轮实施）
+
+前提：设备**没有**可用系统代理（PAC/直连），此时 C1 无法统一出口。
+剩余思路（均需老板决策，因为它们改变产品行为而非纯内部修复）：
+
+- **D1 只提示不接管**：WebView 页面顶栏明确提示「内部浏览器未走 DoH」，
+  不假装覆盖（**当前默认行为，已实现**）。
+- **D2 WebView 侧降级**：内部浏览器在 iOS <17 自动用 Dart 经 DoH 代理取文档、
+  以 `loadData` / 本地服务方式渲染。成本高且会破坏 SPA 行为，**不推荐**。
+- **D3 换用可被接管的 WebView 内核**：改用自带代理配置的第三方内核，
+  工程量大，超出本轮范围。
+
 ## 四、恢复 guard 的边界（写死在代码注释里）
 
 `_requiresUnsupportedProxySkips()`：

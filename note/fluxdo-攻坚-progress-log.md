@@ -140,3 +140,72 @@ IPA `fluxdo-ios14-test-18-cbb44e38.ipa`（54.8 MB）
    - `false`（PAC/直连）→ 路径 C 不足以统一出口，需转 `NEPacketTunnelProvider`
      或改「WebView 侧跟随 DoH 而非反过来」的方向。
 3. 该采样仅 iOS 生效、失败不影响导航（不引入任何 iOS 暂停/挂起逻辑）。
+
+## 2026-10-09 08:00 CST | 出口「可验证性」补全 + 上轮 CI 失败根因（未出包）
+
+**上轮 CI 核对（结论修正，重要）**：run `37858290951`（commit `abcf9ed5`）
+**completed failure**——但**不是** Release 步骤、也**不是**构建问题：
+**step 7「格式与静态分析」就挂了**，step 8/9/10/12/13/14 全部 skipped，
+**本轮及上轮都没有产出 IPA / Release `ios14-test-19`**。
+日志原文（job logs，时间已换算）：
+`warning - system_proxy_service.dart:2:8 - Unused import: 'dart:convert' - unused_import`
+→ `1 issue found` → `##[error]Process completed with exit code 2`。
+即 `dart analyze --fatal-infos` 对**改动文件**把未使用 import 当**致命**错误，
+整个 job 在构建前中止。**上轮进度日志把 `ios14-test-18` 当作「最新出包」是对的，
+但 `abcf9ed5` 这一轮实际没有任何产物**，已在本次修正。
+
+**本轮改动**（commit `333cc18a` + `27c2200f`，均已 push）：
+两个「让 DoH 接管内部浏览器**可被验证**」的缺口补齐：
+
+1. **`webViewProxyApplied` 单布尔值会撒谎**。iOS 14 上「本系统版本没有接管 API」
+   与「有 API 但调用失败」都塌缩成 `false`，真机排查无法区分——这正是历史上
+   「设置成功但没用」误判的来源。已拆成：
+   - `webViewProxyState`：`unsupported` / `not-running` / `attempting` /
+     `failed` / `applied` 五态（`network_settings_service.dart`）；
+   - `webViewProxyAttempted`：是否**真的发起过**接管调用（而非被 version guard 短路）；
+   - `lastWebViewProxyError` + `lastWebViewProxyErrorWasMissingPlugin`：
+     `MissingPluginException` 单独分类 → 一句话定性「原生接口未注册」。
+   诊断页 `ios14_network_diagnostics_page.dart` 新增 `webViewProxyStateLabel()`
+   与对应文案行，报告 JSON 增加 4 个字段。
+2. **`route=gateway` 只证明「交给本地网关」，不证明「出口是 DoH」**。
+   新增**三态** `DohRouteDiagnostics.dohEgressVerified`
+   （`null` = 未采样，**绝不冒充成功** / `true` / `false`），
+   由原生采样 `CFNetworkCopyProxiesForURL`（`SystemProxyProbe`）回填：
+   - `webview_page.dart` 每次导航采样后调用
+     `NetworkSettingsService.recordWebViewEgressEvidence(probe)`，把前提钉进日志与记录；
+   - 逐请求路由记录新增 `dohEgressVerified` 字段（仅 `gateway` 路由有意义，
+     其余恒 `null`，避免误读）。
+   - 判定刻意保守：非 iOS / 无采样数据 → `null`；PAC、直连、与系统设置
+     host:port 不一致 → `false`。
+
+**修复上轮 CI 失败**：删除 `lib/services/network/system_proxy_service.dart` 的
+未使用 `import 'dart:convert';`（commit `27c2200f`），使 step 7 能过。
+
+**测试**：新增 `test/services/network/doh_egress_verification_test.dart`（8 例，
+**本地全过**），锁死「未采样不冒充成功 / 非 gateway 路由不带结论 / 脏值不残留 /
+同值不通知 / 已移除监听器不再回调」；已加入 CI step 8 列表。
+既有 `webview_exit_probe_test.dart` 8/8、`ios14_diagnostics_test.dart` 3/3、
+`ios14_diagnostics_page_test.dart` 1/1 **本地全过**。
+
+**本地校验**：`dart format --set-exit-if-changed` 对 CI 全量改动集（31 文件）
+**0 changed** ✅。`dart analyze` 本机受限：容器 2 核 3.7G、**可用内存仅约 1.2G
+且无 swap**，对 `webview_page.dart` / `network_settings_service.dart` 等大文件
+分析器 **OOM 崩溃**（`analysis server crashed unexpectedly`）；本次新增/小文件
+（`doh_route_diagnostics.dart` / `ios14_diagnostics.dart` / `system_proxy_service.dart` /
+新测试）**本地 analyze 均 No issues found**。已人工核对：本轮 diff **未新增任何
+import**，故未使用 import 这类致命项不可能由本轮引入。
+
+**CI**：commit `27c2200f` → run **`37864683300`**（2026-10-09 08:25 CST 触发，pending）；
+同时 run `37864338117`（`333cc18a`）仍 in_progress。
+两个 run 里**只有 `27c2200f` 那个的结果才有意义**（后者缺 import 修复）。
+
+**下一步**：
+1. 核对 run `37864683300` 的 step 7/8/9/10 与是否出 `ios14-test-19` + IPA 直链。
+   step 7 若再挂，优先看是否又是未使用 import/未格式化。
+2. 老板实机（装 IPA 后）开内部浏览器，看两行日志：
+   - `[DOH] WebView 代理接管跳过：...` → `webViewProxyState=unsupported`（预期）
+   - `[DOH] 内部浏览器出口采样: ... exitIsSystemProxy=...` +
+     `[DOH] 内部浏览器出口结论: ... egressVerified=...`
+     其中 `egressVerified=true` 才说明「内部浏览器与 DoH 出口已确证一致」；
+     `false`（PAC/直连）→ 路径 C 不足，转 `NEPacketTunnelProvider` 方向。
+3. 诊断页新增文案可直接截图给老板，无需看日志。

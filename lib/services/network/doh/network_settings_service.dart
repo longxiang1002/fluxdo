@@ -1035,19 +1035,28 @@ class NetworkSettingsService {
   /// （PAC-only / 进程内另有代理配置时不成立）。
   ///
   /// 判定规则（保守，绝不把「未知」当「成功」）：
-  /// - WebView 内核已接管（iOS 17+ `applied`）→ `true`
-  /// - 平台本就不支持接管 + 进程内固定代理与系统设置一致 → `true`
-  /// - 平台不支持接管 + 进程内是 PAC / 直连 / 与系统设置不一致 → `false`
   /// - 无采样数据 / 非 iOS → `null`（不冒充成功）
+  /// - WebView 已接管到本地网关（iOS 17+ `applied`）→ `true`
+  /// - iOS <17（`unsupported`）：WebView 不经本地网关。此时**只有
+  ///   [isGatewayMode] 为真（本地 DoH 网关真的在跑）才存在「DoH 出口」这个
+  ///   东西可与 WebView 出口比对：
+  ///   - 进程内固定代理且与系统设置一致 → `true`（两通道同经该代理）
+  ///   - PAC / 直连 / 与系统设置不一致 → `false`
+  ///   - 网关没在跑 → `null`：WebView 与 Dart 出口**都**不经 DoH，
+  ///     「出口一致」在此毫无意义，`true` 会严重误导（历史误判来源）。
   ///
   /// 结果写回 [DohRouteDiagnostics.setDohEgressVerified]，让逐请求路由记录里的
   /// `dohEgressVerified` 字段能与之对应。仅 iOS 生效，失败不影响导航。
   bool? recordWebViewEgressEvidence(SystemProxyProbe? probe) {
-    final bool? verified = _resolveEgressVerified(probe);
+    final bool? verified = _resolveEgressVerified(
+      probe,
+      isGatewayMode: isGatewayMode,
+    );
     DohRouteDiagnostics.instance.setDohEgressVerified(verified);
     debugPrint(
       '[DOH] 内部浏览器出口结论: state=${webViewProxyState} '
       'egressVerified=${verified ?? 'unknown'} '
+      'gatewayMode=$isGatewayMode '
       'systemProxy=${probe?.systemProxyUrl ?? "none"} '
       'webViewProxyAttempted=$_webViewProxyAttempted',
     );
@@ -1058,11 +1067,20 @@ class NetworkSettingsService {
   ///
   /// 非 iOS 恒为 `null`：其它平台不依赖系统代理做出口统一，
   /// 采样结论与「内部浏览器是否走 DoH」无关，不得拿来充数。
-  static bool? _resolveEgressVerified(SystemProxyProbe? probe) {
+  static bool? _resolveEgressVerified(
+    SystemProxyProbe? probe, {
+    required bool isGatewayMode,
+  }) {
     if (!Platform.isIOS) return null;
     if (probe == null) return null;
-    // 进程内是固定代理且与系统设置一致 → WebView 与网关同经该代理，
-    // 出口天然一致；PAC / 直连 / 与系统设置不一致都只能算「不一致」。
+    if (!isGatewayMode) {
+      // 本地 DoH 网关未运行：WebView 与 Dart 出口都不经 DoH，
+      // 说「一致」是伪结论。留 null，让调用方区分「未知」与「已确证」。
+      return null;
+    }
+    // 网关在跑：WebView 经系统代理、网关出站也跟随系统代理（见
+    // `_systemProxyUrlForGateway`）→ 两通道出口同源。前提是进程内
+    // 真的是固定代理而非 PAC；PAC / 直连都判不一致。
     return probe.effectiveExitIsSystemProxy;
   }
 
