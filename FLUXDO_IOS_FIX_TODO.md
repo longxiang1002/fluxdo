@@ -3,6 +3,51 @@
 > 分支 `fix/ios14-network-thermal`。每轮必须动手改代码，写完记 CI 结果。
 > **2026-10-09 起方向切换**：发热/过盾暂缓，唯一主攻 = **DoH 代理接管内部浏览器流量**。
 
+## 🎯 本轮（2026-10-09 09:00 CST）— 打通 CI 卡点 + 修「出口一致」假阳性 + C2 定论
+
+### 关键事实修正（上轮日志有误）
+上轮（08:00）把「最新出包」记为 `ios14-test-18` 是对的，但**此后三轮均未出包**：
+`37858290951`(`abcf9ed5`) / `37864338117`(`333cc18a`) / `37864683300`(`27c2200f`)
+/ `37867764680`(`c076fd62`) 全部 **failure@step 7「格式与静态分析」**，
+step 8/9/10/12/13/14 全 skipped。真正原因**不是** Release 403、**不是**构建：
+- `abcf9ed5`：`system_proxy_service.dart` 未使用 import（已在 `27c2200f` 修）
+- `333cc18a`：`on MissingPluginException` 漏 import → `non_type_in_catch_clause`
+- `c076fd62`：`gatewayMode=$isGatewayMode` → `unnecessary_brace_in_string_interps`
+  （**info 级 lint 也被 `--fatal-infos` 当致命**）
+
+→ 教训：**CI step 7 是本分支最常挂的一步**，而且本地跑不了 `dart analyze`
+（容器内存 ~1.2G 无 swap，analysis server 直接崩）。本地只能保证
+`dart format --set-exit-if-changed` + parse-only；**lint 必须在 CI 日志里读原始行**，
+每次核对 run 先看 step 7，挂了就 `actions/jobs/<id>/logs` 拉全文 grep `info -|error -`。
+
+### 本轮实际改动（3 commit，已 push）
+- [x] `c076fd62`：补 `package:flutter/services.dart` 的 `MissingPluginException`
+      import；去掉一处多余花括号插值
+- [x] `b45d755d`：**修「出口一致」假阳性** ——
+      iOS 14 + **本地 DoH 网关未运行**时，原来只要进程内是固定系统代理就报
+      `egressVerified=true`，可当时 WebView 与 Dart **都没走 DoH**。
+      现在 `_resolveEgressVerified(probe, isGatewayMode:)` 在网关未运行时恒 `null`；
+      debug 行补打 `gatewayMode=`
+- [x] `a55c6761`：`${isGatewayMode.toString()}` 修 CI 卡点
+- [x] `docs/ios14-webview-doh-handoff.md`：新增 **C2 可行性定论**
+
+### 路径 C2 定论（本轮调研）
+`NEPacketTunnelProvider` 在 TrollStore 下**不成立**：
+`Runner.entitlements` 无 `networkextension` entitlement；TrollStore 永久签名不走
+Apple provisioning，`nesessionmanager` 校验拿不到该 entitlement；工程无 Extension
+target；且会接管**全机**流量。**→ 剩余可行方向只有 C1**（让 DoH 出站跟随系统代理，
+靠系统代理把两通道出口拉齐），前提由 `SystemProxyProbe` 真机采样判定。
+
+### 本轮 CI
+- commit `a55c6761` → run **`37868810324`**（09:14 CST 触发，in_progress）
+- 上一批 `37867764680`(`c076fd62`) / `37864683300`(`27c2200f`) 均 **failure@step7**
+
+### 待办
+- [ ] 核对 run `37868810324` step 7/8/9/10，确认出 `ios14-test-*` + IPA 直链
+- [ ] 老板实机验证 `[DOH] 内部浏览器出口结论`：需 `gatewayMode=true`
+      **且** `egressVerified=true` 才算「两通道同经系统代理」；
+      `unknown` = 网关没跑（无意义）；`false` = PAC/直连 → 转产品层决策
+
 ## 🎯 主攻目标
 
 让 iOS 14.8 的**内部浏览器（WKWebView）**流量与 Dart/rhttp/Dio 通道**走同一 DoH 出口**。

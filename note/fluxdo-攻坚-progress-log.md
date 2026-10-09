@@ -209,3 +209,58 @@ import**，故未使用 import 这类致命项不可能由本轮引入。
      其中 `egressVerified=true` 才说明「内部浏览器与 DoH 出口已确证一致」；
      `false`（PAC/直连）→ 路径 C 不足，转 `NEPacketTunnelProvider` 方向。
 3. 诊断页新增文案可直接截图给老板，无需看日志。
+
+## 2026-10-09 09:00 CST | 打通 CI 卡点 + 修掉「出口一致」假阳性 + 路径 C2 可行性定论
+
+**上轮 CI 真实失败原因（已定位，非 Release/构建问题）**：run `37867764680`
+（commit `c076fd62`）step 7「格式与静态分析」`completed failure`，exit code 1，
+step 8/9/10/12/13/14 全 skipped → **上一轮没有产出 IPA**。
+CI 日志原文（已换算北京时间，`01:11:28Z` = `09:11 CST`）：
+`info - network_settings_service.dart:1049:31 - Unnecessary braces in a string
+interpolation - unnecessary_brace_in_string_interps` → `1 issue found`。
+根因：`dart analyze --fatal-infos` 把 **info 级 lint 当致命错误**，而
+`debugPrint` 里 `gatewayMode=$isGatewayMode` 的 `$bool` 被 linter 要求去掉花括号，
+与 `"$var"`/`'$var'` 引号风格互相打架（`${verified ?? 'unknown'}` 那种写法则必须留）。
+
+**本轮改动**（3 个 commit，已 push）：
+1. `c076fd62`：`network_settings_service.dart` 补
+   `import 'package:flutter/services.dart' show MissingPluginException;`
+   （`333cc18a` 引入 `on MissingPluginException` 却漏 import → 上上轮 CI 挂在这里，
+   报 `non_type_in_catch_clause`）；同一处字符串插值去掉多余花括号。
+2. `b45d755d`：**修掉「出口一致」假阳性** ——
+   `recordWebViewEgressEvidence()` 原样返回 `probe.effectiveExitIsSystemProxy`，
+   于是在 iOS 14 + **DoH 关闭（本地网关没跑）** 时，只要进程内是固定系统代理，
+   就报 `egressVerified=true`。但那两个通道**都没走 DoH**，
+   「出口一致」是伪结论。改为 `_resolveEgressVerified(probe, isGatewayMode:)`：
+   网关未运行时恒 `null`（未知，不冒充）；网关在跑才按采样判 true/false。
+   debug 行补打 `gatewayMode`，单看真机日志即可区分「未知/已确证」。
+   → `docs/ios14-webview-doh-handoff.md` 增加 **C2 可行性定论**（见下）。
+3. `a55c6761`：`gatewayMode=${isGatewayMode.toString()}` —— 修 CI 卡点本身。
+
+**路径 C2 可行性定论（本轮调研，源码级）**：
+`NEPacketTunnelProvider` 在 TrollStore 环境下**不成立**：
+- `ios/Runner/Runner.entitlements` 只有 `com.apple.developer.web-browser`，
+  **没有** `com.apple.developer.networking.networkextension`；
+- TrollStore 是永久签名注入、不走 Apple provisioning，
+  `nesessionmanager` 校验签名里的 networkextension entitlement 拿不到；
+- 工程也**没有** Extension target（`NSExtensionPointIdentifier =
+  com.apple.networkextension.packet-tunnel`）；
+- 且一旦成立会接管**全机**流量，超出「本 App WebView 走 DoH」范围。
+→ **剩余可行方向只有 C1**（DoH 出站跟随系统代理，两通道出口 IP 一致），
+  其成立前提由 `SystemProxyProbe.effectiveExitIsSystemProxy` 真机采样判定。
+  若设备无可用系统代理，则 C1 不成立，只能走「明示未覆盖」等产品层决策。
+
+**CI**：commit `a55c6761` → run **`37868810324`**（09:14 CST 触发，in_progress）。
+上一批：`37867764680`（`c076fd62`）failure@step7；`37864683300`（`27c2200f`）
+failure@step7（`non_type_in_catch_clause`）。
+
+**下一步**：
+1. 核对 run `37868810324` step 7（关键）/8/9/10，确认出 `ios14-test-*` 与 IPA 直链。
+   step 7 若再挂，**第一件事**就是拉 job logs 看 `info -`/`error -` 原始行，
+   本地只能兜底到 format + parse，`--fatal-infos` 的 lint 本机跑不了
+   （`analysis server crashed unexpectedly`，容器可用内存约 1.2G 无 swap）。
+2. 老板实机（装 IPA）开内部浏览器，看两行日志：
+   - `[DOH] 内部浏览器出口采样: ... exitIsSystemProxy=...`
+   - `[DOH] 内部浏览器出口结论: ... egressVerified=? gatewayMode=?`
+   只有 `gatewayMode=true` 且 `egressVerified=true` 才说明「两通道同经系统代理」；
+   `egressVerified=unknown` = 网关没跑（无意义）；`false` = PAC/直连 → 转产品层决策。
