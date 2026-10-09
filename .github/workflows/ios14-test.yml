@@ -66,6 +66,7 @@ jobs:
             test/services/network/adapters/gateway_request_test.dart \
             test/services/network/gateway_system_proxy_source_test.dart \
             test/services/network/webview_exit_probe_test.dart \
+            test/services/network/doh_egress_verification_test.dart \
             test/services/screen_track_timing_test.dart \
             test/services/diagnostics/ios14_diagnostics_test.dart \
             test/pages/ios14_diagnostics_page_test.dart \

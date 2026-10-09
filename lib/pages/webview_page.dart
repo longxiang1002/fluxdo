@@ -96,6 +96,9 @@ class _WebViewPageState extends ConsumerState<WebViewPage> {
         '[DOH] 内部浏览器出口采样: ${probe.describe()} '
         'dohGatewayUpstream=${gatewayUpstream ?? 'direct'}',
       );
+      // 把这一次采样的结论登记为「内部浏览器出口是否确证走 DoH」，
+      // 供逐请求路由记录（dohEgressVerified）与诊断页对应。
+      NetworkSettingsService.instance.recordWebViewEgressEvidence(probe);
       if (probe.effectiveExitIsSystemProxy != true) {
         debugPrint(
           '[DOH] ⚠️ WebView 出口未被系统代理决定（PAC/直连）→ '

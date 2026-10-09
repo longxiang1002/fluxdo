@@ -22,6 +22,7 @@ import '../system_proxy_service.dart';
 import '../webview/webview_adapter_settings_service.dart';
 import '../../windows_webview_environment_service.dart';
 import 'doh_resolver.dart';
+import 'doh_route_diagnostics.dart';
 import 'webview_mitm_policy.dart';
 
 class NetworkSettings {
@@ -237,6 +238,20 @@ class NetworkSettingsService {
 
   final ValueNotifier<bool> isApplying = ValueNotifier(false);
 
+  /// iOS < 17 上 `_applyWebViewProxy()` 是否**未被短路**（真的尝试过接管）。
+  ///
+  /// 与 [_webViewProxySet] 的区别：后者只有在调用成功后才是 true，而 iOS 14
+  /// 上原生 MethodChannel 根本没注册（`MissingPluginException`），于是
+  /// 「能力不支持」和「调用失败」在 `webViewProxyApplied == false` 里混成同一
+  /// 个值。真机排查时无法区分「本来就不支持」和「支持但报错了」。
+  /// 这里把「是否真的发起过调用」单独暴露，让诊断页能给出确定结论。
+  bool _webViewProxyAttempted = false;
+
+  /// iOS < 17 上 `_applyWebViewProxy()` 捕获到的具体失败原因（无异常原文以外的
+  /// 用户数据；只保留类型名与是否为 MissingPluginException）。
+  String? _lastWebViewProxyError;
+  bool _lastWebViewProxyErrorWasMissingPlugin = false;
+
   int get version => _version;
   DohResolver get resolver => _resolver;
   bool get lastStartFailed => _lastStartFailed;
@@ -247,6 +262,41 @@ class NetworkSettingsService {
   /// 仅报告代理设置实际完成，不把 DoH 偏好等同于 WebView 已接管。
   bool get webViewProxyApplied =>
       _webViewProxySet && _rustProxyService.isRunning && !_lastStartFailed;
+
+  /// 是否真的对系统 WebView 发起过代理接管调用（而非被版本 guard 短路）。
+  bool get webViewProxyAttempted => _webViewProxyAttempted;
+
+  /// 最近一次 WebView 代理接管失败的原因摘要，成功或未尝试时为 null。
+  String? get lastWebViewProxyError => _lastWebViewProxyError;
+
+  /// 上述失败是否为 `MissingPluginException`（= 原生侧未注册，属能力缺失）。
+  bool get lastWebViewProxyErrorWasMissingPlugin =>
+      _lastWebViewProxyErrorWasMissingPlugin;
+
+  /// 内部浏览器出口状态的一句话结论（用于诊断页与日志）。
+  ///
+  /// 取值刻意区分四态，避免把「未接管」误读成「已接管但没生效」：
+  /// - `unsupported`  → 当前系统版本无接管 API（iOS < 17 / macOS < 14）
+  /// - `not-running`  → 本地代理未运行或启动失败，无需/无法接管
+  /// - `attempting`   → 已发起接管调用，但尚无成功/失败结论
+  /// - `failed`       → 发起过调用但抛异常（含 MissingPluginException）
+  /// - `applied`      → 接管调用成功
+  String get webViewProxyState {
+    if ((Platform.isIOS || Platform.isMacOS) &&
+        !_supportsProxyOverrideForPlatform) {
+      return 'unsupported';
+    }
+    if (_webViewProxySet && _rustProxyService.isRunning && !_lastStartFailed) {
+      return 'applied';
+    }
+    if (_lastWebViewProxyError != null) {
+      return 'failed';
+    }
+    if (_webViewProxyAttempted) {
+      return 'attempting';
+    }
+    return 'not-running';
+  }
 
   /// 获取代理服务（优先使用 Rust 代理）
   DohProxyService get proxyService => _rustProxyService;
@@ -805,9 +855,11 @@ class NetworkSettingsService {
     }
 
     if (await _requiresUnsupportedProxySkips()) {
+      _recordWebViewProxyUnsupported('iOS/macOS 版本低于接管 API 要求');
       return;
     }
 
+    _webViewProxyAttempted = true;
     try {
       await inappwebview.ProxyController.instance().setProxyOverride(
         settings: inappwebview.ProxySettings(
@@ -815,10 +867,37 @@ class NetworkSettingsService {
         ),
       );
       _webViewProxySet = true;
+      _lastWebViewProxyError = null;
+      _lastWebViewProxyErrorWasMissingPlugin = false;
       debugPrint('[DOH] WebView 代理已设置 -> 127.0.0.1:$port');
+    } on MissingPluginException catch (e) {
+      // 原生侧未注册（典型：iOS < 17 无 ProxyManager）——属**能力缺失**，
+      // 不是配置问题。单独分类，让真机日志能一句话定性。
+      _webViewProxySet = false;
+      _lastWebViewProxyError = 'MissingPluginException';
+      _lastWebViewProxyErrorWasMissingPlugin = true;
+      debugPrint(
+        '[DOH] WebView 代理接管不可用：原生 ProxyController 未注册 '
+        '(${e.message}) → 内部浏览器流量裸连，不走本地 DoH',
+      );
     } catch (e) {
-      debugPrint('[DOH] WebView 代理设置失败: $e');
+      _webViewProxySet = false;
+      _lastWebViewProxyError = e.runtimeType.toString();
+      _lastWebViewProxyErrorWasMissingPlugin = false;
+      debugPrint('[DOH] WebView 代理设置失败(${e.runtimeType}): $e');
     }
+  }
+
+  /// 记录「因平台能力缺失而根本未尝试接管」的状态。
+  ///
+  /// 与 [webViewProxyAttempted] 配合，使诊断报告能明确区分
+  /// 「没尝试（不支持）」和「尝试了但失败」。
+  void _recordWebViewProxyUnsupported(String reason) {
+    _webViewProxyAttempted = false;
+    _webViewProxySet = false;
+    _lastWebViewProxyError = null;
+    _lastWebViewProxyErrorWasMissingPlugin = false;
+    debugPrint('[DOH] WebView 代理接管跳过：$reason');
   }
 
   /// 当前平台是否**无法**通过 `ProxyController.setProxyOverride` 接管 WebView。
@@ -864,12 +943,27 @@ class NetworkSettingsService {
     return true;
   }
 
+  /// 同步版本的能力判断（用于 [webViewProxyState] 这类非 async 取值）。
+  ///
+  /// 只回答「这个**平台 + 系统大版本**是否具备接管 API」，不做任何 IO。
+  /// iOS/macOS 的大版本缓存由 [_isiOS17OrAbove] / [_isMacOS14OrAbove] 填充；
+  /// 尚未采样到缓存时保守返回 `false`（= 不具备），避免把未知冒充成支持。
+  bool get _supportsProxyOverrideForPlatform {
+    if (Platform.isAndroid) return true;
+    if (Platform.isIOS) return _isiOS17OrAboveCache ?? false;
+    if (Platform.isMacOS) return _isMacOS14OrAboveCache ?? false;
+    return false;
+  }
+
   Future<bool> _clearWebViewProxy() async {
     if (Platform.isWindows) {
       try {
         final applied = await WindowsWebViewEnvironmentService.instance
             .setProxy(null);
         _webViewProxySet = false;
+        _webViewProxyAttempted = false;
+        _lastWebViewProxyError = null;
+        _lastWebViewProxyErrorWasMissingPlugin = false;
         debugPrint(
           applied ? '[DOH] WebView2 代理已清除' : '[DOH] WebView2 代理清除已登记，重启应用后生效',
         );
@@ -880,15 +974,21 @@ class NetworkSettingsService {
       }
     }
 
-    if (!_webViewProxySet) return true;
+    if (!_webViewProxySet && !_webViewProxyAttempted) return true;
 
     // 与 _applyWebViewProxy 同一能力判断：不支持时无需也无法清除。
     if (await _requiresUnsupportedProxySkips()) {
+      _webViewProxyAttempted = false;
+      _lastWebViewProxyError = null;
+      _lastWebViewProxyErrorWasMissingPlugin = false;
       return true;
     }
     try {
       await inappwebview.ProxyController.instance().clearProxyOverride();
       _webViewProxySet = false;
+      _webViewProxyAttempted = false;
+      _lastWebViewProxyError = null;
+      _lastWebViewProxyErrorWasMissingPlugin = false;
       debugPrint('[DOH] WebView 代理已清除');
       return true;
     } catch (e) {
@@ -923,6 +1023,46 @@ class NetworkSettingsService {
     _version++;
     // 通过重新赋值触发监听器更新
     notifier.value = notifier.value.copyWith();
+  }
+
+  /// 用一次 **WebView 出口采样** 判定「内部浏览器与 DoH 是否同一出口」。
+  ///
+  /// 背景：iOS < 17 无法把 WebView 指向本地 DoH 网关（见
+  /// [webViewProxyState] == `unsupported`），两通道只能靠「同经系统代理」
+  /// 达到出口 IP 一致。出口一致这件事**只能实测**，不能靠设置推断：
+  /// `CFNetworkCopySystemProxySettings` 读得到系统设置 ≠ App 进程内出口由它决定
+  /// （PAC-only / 进程内另有代理配置时不成立）。
+  ///
+  /// 判定规则（保守，绝不把「未知」当「成功」）：
+  /// - WebView 内核已接管（iOS 17+ `applied`）→ `true`
+  /// - 平台本就不支持接管 + 进程内固定代理与系统设置一致 → `true`
+  /// - 平台不支持接管 + 进程内是 PAC / 直连 / 与系统设置不一致 → `false`
+  /// - 无采样数据 / 非 iOS → `null`（不冒充成功）
+  ///
+  /// 结果写回 [DohRouteDiagnostics.setDohEgressVerified]，让逐请求路由记录里的
+  /// `dohEgressVerified` 字段能与之对应。仅 iOS 生效，失败不影响导航。
+  bool? recordWebViewEgressEvidence(SystemProxyProbe? probe) {
+    final bool? verified = _resolveEgressVerified(probe);
+    DohRouteDiagnostics.instance.setDohEgressVerified(verified);
+    debugPrint(
+      '[DOH] 内部浏览器出口结论: state=${webViewProxyState} '
+      'egressVerified=${verified ?? "unknown"} '
+      'systemProxy=${probe?.systemProxyUrl ?? "none"} '
+      'webViewProxyAttempted=$_webViewProxyAttempted',
+    );
+    return verified;
+  }
+
+  /// [recordWebViewEgressEvidence] 的纯判定部分（便于测试与复用）。
+  ///
+  /// 非 iOS 恒为 `null`：其它平台不依赖系统代理做出口统一，
+  /// 采样结论与「内部浏览器是否走 DoH」无关，不得拿来充数。
+  static bool? _resolveEgressVerified(SystemProxyProbe? probe) {
+    if (!Platform.isIOS) return null;
+    if (probe == null) return null;
+    // 进程内是固定代理且与系统设置一致 → WebView 与网关同经该代理，
+    // 出口天然一致；PAC / 直连 / 与系统设置不一致都只能算「不一致」。
+    return probe.effectiveExitIsSystemProxy;
   }
 
   void _handleProxySettingsChanged() {

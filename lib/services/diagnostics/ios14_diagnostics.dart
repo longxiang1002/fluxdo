@@ -26,7 +26,18 @@ enum Ios14DiagnosticEvent {
 
 enum Ios14RouteEngine { io, cupertino, rhttp, webView, other }
 
-enum Ios14RoutePath { direct, dohGateway, fallback, webViewUncovered }
+/// 请求**实际**走哪条路。
+///
+/// `dohGateway` 只表示「交给本地 DoH 网关」，`dohTunnel` 表示「WebView 内核
+/// 接管且网关隧道可用」；两者都不单独证明出口 DoH，需配合
+/// `dohRouteExact` 才等于已验证。
+enum Ios14RoutePath {
+  direct,
+  dohGateway,
+  fallback,
+  webViewUncovered,
+  dohTunnel,
+}
 
 /// 默认关闭，仅在内存中按分钟聚合；无定时器、监听器和磁盘写入。
 /// 关闭时不读取时钟；视频释放表示内联租户释放，

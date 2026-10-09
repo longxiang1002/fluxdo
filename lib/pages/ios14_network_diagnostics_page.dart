@@ -9,6 +9,19 @@ import '../services/network/adapters/platform_adapter.dart';
 import '../services/network/doh/doh_route_diagnostics.dart';
 import '../services/network/doh/network_settings_service.dart';
 
+/// 把 [NetworkSettingsService.webViewProxyState] 的机器值翻成一句人话。
+///
+/// 刻意与枚举一一对应、不回退到默认文案：测试包需要能从界面文字直接区分
+/// 「系统版本就没有这个能力」和「有能力但调用失败」。
+String webViewProxyStateLabel(String state) => switch (state) {
+  'unsupported' => '当前系统版本无接管 API',
+  'not-running' => '本地代理未运行，未尝试接管',
+  'attempting' => '已发起接管，结果未定',
+  'failed' => '已发起接管但失败',
+  'applied' => '接管调用已成功',
+  _ => '状态未知',
+};
+
 /// 测试包专用入口：所有显示内容均为能力/路由元数据，无账户内容。
 class Ios14NetworkDiagnosticsPage extends StatefulWidget {
   const Ios14NetworkDiagnosticsPage({super.key});
@@ -96,6 +109,16 @@ class _Ios14NetworkDiagnosticsPageState
       _settings.current.selectedServerUrl,
     ),
     'webViewProxyApplied': _settings.webViewProxyApplied,
+    // 三态拆解：把「本来就无接管 API」「尝试过但失败」「成功」分开，
+    // 避免 webViewProxyApplied=false 这一个布尔值掩盖真实原因。
+    'webViewProxyState': _settings.webViewProxyState,
+    'webViewProxyAttempted': _settings.webViewProxyAttempted,
+    'webViewProxyError': _settings.lastWebViewProxyError,
+    'webViewProxyErrorIsMissingPlugin':
+        _settings.lastWebViewProxyErrorWasMissingPlugin,
+    // 内部浏览器与 DoH 是否已确证同一出口（null = 未采样，不冒充成功）。
+    'dohEgressVerified': _routes.dohEgressVerified,
+    'dohRouteExact': _routes.dohRouteExact,
     'iosIoFallback': usesIosIoTransport,
     'dnsTestVersion': _testedVersion,
     'dnsTestResult': _dnsResult,
@@ -124,7 +147,21 @@ class _Ios14NetworkDiagnosticsPageState
             '配置应用中：${_settings.isApplying.value || _settings.pendingStart ? "是，稍后重新验证" : "否"}',
           ),
           Text(
-            'WebView 代理实际设置：${_settings.webViewProxyApplied ? "已应用" : "未应用"}',
+            'WebView 代理实际设置：${_settings.webViewProxyApplied ? "已应用" : "未应用"}'
+            '（${webViewProxyStateLabel(_settings.webViewProxyState)}）',
+          ),
+          if (_settings.lastWebViewProxyError != null)
+            Text(
+              'WebView 接管失败原因：${_settings.lastWebViewProxyError}'
+              '${_settings.lastWebViewProxyErrorWasMissingPlugin ? "（原生接口未注册，属系统版本能力缺失）" : ""}',
+            ),
+          Text(
+            '内部浏览器与 DoH 出口是否一致：'
+            '${switch (_routes.dohEgressVerified) {
+              true => "已确证一致",
+              false => "已确证不一致",
+              null => "尚未采样",
+            }}',
           ),
           if (webViewUnsupported)
             const Padding(
@@ -152,7 +189,7 @@ class _Ios14NetworkDiagnosticsPageState
             onChanged: (value) => setState(() => _routes.setEnabled(value)),
           ),
           const Text(
-            'gateway 表示请求实际交给本地网关；还需 gatewayResolverMatched=true 才说明解析器配置匹配且无固定 IP 覆盖。HTTP 状态仅为响应头结果。direct-or-rhttp 不等于已验证 DoH；webview 不等于已接入应用 DoH。配置代号不同的记录仅作历史参考。',
+            'gateway 表示请求实际交给本地网关；还需 gatewayResolverMatched=true 才说明解析器配置匹配且无固定 IP 覆盖。dohEgressVerified 只有在内部浏览器出口被实测确证走 DoH 时才为 true，未采样运行时为 null（不冒充成功）。HTTP 状态仅为响应头结果。direct-or-rhttp 不等于已验证 DoH；webview 不等于已接入应用 DoH。配置代号不同的记录仅作历史参考。',
           ),
           Wrap(
             spacing: 8,
