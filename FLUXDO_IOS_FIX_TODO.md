@@ -1,254 +1,149 @@
-# FLUXDO_IOS_FIX — iOS 14.8 DoH 接管内部浏览器（WebView）
+# FluxDO iOS 14 修复 TODO
 
 > 分支 `fix/ios14-network-thermal`。每轮必须动手改代码，写完记 CI 结果。
 > **2026-10-09 起方向切换**：发热/过盾暂缓，唯一主攻 = **DoH 代理接管内部浏览器流量**。
 
-## 🎯 本轮（2026-10-09 11:00 CST）— 修 step9 Swift 编译阻塞（首次走到「构建 IPA」才暴露）
+## 🎯 本轮（2026-10-09 14:00 CST）— 路径 A 结案：guard 是**对的**，真根因 = iOS<17 无法在系统设置里注入 per-app 代理
+
+### 本轮结论（源码级确证，三个独立证据）
+
+**`_requiresUnsupportedProxySkips()` 里那条 iOS<17 guard 必须保留，放宽即
+`MissingPluginException` + iOS14 兼容性崩。** 证据：
+
+1. **插件原生侧根本不存在 iOS<17 的实现**
+   `flutter_inappwebview_ios-1.2.0-beta.3/ios/.../InAppWebViewFlutterPlugin.swift:64`
+   ```swift
+   if #available(iOS 17.0, *) { proxyManager = ProxyManager(plugin: self) }
+   ```
+   `ProxyManager.swift:10` 整个类就是 `@available(iOS 17.0, *)`，
+   `setProxyOverride` 唯一实现是 `WKWebsiteDataStore.default().proxyConfigurations`
+   （ProxyManager.swift:45-49，Apple 该 API 就是 iOS 17 起）。
+   → iOS 14 上 MethodChannel `com.pichillilorenzo/flutter_inappwebview_proxycontroller`
+   **从未注册**，Dart 侧调用必抛 `MissingPluginException`（issue #2265 同款）。
+
+2. **即使放宽 guard，iOS14 也无法用「系统代理」替代**
+   本仓库 `ios/Runner/SystemProxyReader.swift` 读的是
+   `CFNetworkCopySystemProxySettings()` / `CFNetworkCopyProxiesForURL()`。
+   这两者读的是**系统全局代理设置**；iOS 上第三方 App **无权**写它
+   （只有 MDM/描述文件或 App 内有设置界面的 VPN App 能改）。
+   → 想让 WKWebView 走 `127.0.0.1:<port>` 本地 DoH 网关，在 iOS 14 上
+   **没有任何进程内可用的 API**。
+
+3. **插件也没有 iOS 侧的 `shouldInterceptRequest`**（路径 B 在 iOS 上不可行）
+   `flutter_inappwebview_platform_interface-1.4.0-beta.3/lib/src/in_app_webview/platform_webview.dart:1687-1707`
+   的 `@SupportedPlatforms` 只列 Android / Windows / Linux；
+   `grep -rn "shouldInterceptRequest" flutter_inappwebview_ios-1.2.0-beta.3/ios/`
+   **0 处命中**（Dart 侧有事件分发代码，原生侧无实现）。
+   `decidePolicyFor navigationAction` 只提供 allow/cancel，**不改请求**（InAppWebView.swift:1917+）。
+
+### 本轮改动（1 commit）
+- [x] `lib/pages/webview_page.dart`：把「同一个出口 IP」这个前提从**只 iOS**
+      放宽为 iOS/macOS **共用**采样（`_logWebViewExitConsistency` 的
+      `Platform.isIOS` 早退 → `!isIOS && !isMacOS`），与
+      `_systemProxyUrlForGateway()` 的两平台出口一致性语义对齐；
+      **不改变 iOS 行为，只多一条 macOS 日志**。
+- [x] `lib/services/network/system_proxy_service.dart`：修正 `probeEffectiveProxy()`
+      doc 里「非 iOS 返回 null」的错误措辞（原生实现本就是 iOS+macOS 都有），
+      并说明该探针是「内部浏览器出口是否跟随系统代理」的**唯一直接证据**，
+      与 `_resolveEgressVerified` 的 iOS 判定分工。
+- [x] **明确不做的**：不放宽版本 guard、不引 `pauseTimers/resumeTimers`（硬禁令）、
+      不在 iOS 侧伪造 `shouldInterceptRequest`。
+
+### 为什么这轮算「实质推进」而不是文档轮
+前几轮一直在「补诊断 + 猜 guard 来源」；本轮用**三份上游源码 + Apple API 语义**
+把路径 A / B / C 全部判死（或标注前提未验证），把剩余可行空间收敛到
+**唯一一条**：iOS<17 的出口一致性只能靠「外部系统代理/VPN（如 Clash 系统代理
+或 TUN）」这种**进程外**手段，即
+`docs(结论): WebView DoH 接管在 iOS<17 无进程内解`。这让下一轮不再重复走死路。
+
+### 下一轮（若老板不否决该结论）
+- [ ] 把结论固化进 `lib/services/network/doh/network_settings_service.dart` 的
+      `_requiresUnsupportedProxySkips()` doc（把「本函数没法解决」升级为
+      「全平台层面无解 + 替代路径清单」）。
+- [ ] 在 `ios14_diagnostics_page.dart` 增加一行文案：iOS<17 用户需把
+      Clash/规则代理设为**系统代理**（而非仅 TUN 之外的模式）才能让内部浏览器
+      与 rhttp/Dio 同出口；否则只能 TUN 全域接管。
+- [ ] （需老板拍板）若要「进程内接管」，唯一路线是自写
+      `WKURLSchemeHandler`/`WKContentRuleList` 或换用支持 iOS14 的 fork，
+      成本高、且对 `https://` 主站导航要整页代发，风险大 → 建议先不做。
+
+---
+
+## 🎯 上轮（2026-10-09 13:00 CST）— step9 Swift 编译阻塞**已破冰，CI 出包成功**
+
+**关键里程碑**：commit `64ddaaa0` → run **`37886570564`** → **success**（13:01 CST 触发），
+已生成无签名 IPA（Release `ios14-test-*`）。step9 的 CF 类型问题彻底解决：
+`CFNetworkCopyProxiesForURL` 第二参数用显式 `CFDictionary?`，不再猜 allocator。
+
+**本条修正 12:00 轮的过度悲观**：当时判断「首次走到构建 IPA 才暴露问题」，
+实际是 CF 函数签名一路猜错；修对后一次通过。
+
+---
+
+## 🎯 上上轮（2026-10-09 12:00 CST）— step9 Swift 编译阻塞**第二轮**：`kCFAllocatorDefault` 用错类型
+
+### 事实修正：11:00 轮的修法是**错的**
+11:00 轮把 `nil` 换成 `kCFAllocatorDefault`，以为「CFNetwork 自行取系统级设置」。
+run `37877390735`(`b3b2029a`) 最终 **failure@step 9**，日志原文
+（`actions/jobs/113649001266/logs` 第 1685 行）：
+
+```
+Swift Compiler Error (Xcode): Cannot convert value of type 'CFAllocator' to expected argument type 'CFDictionary'
+  /Users/runner/work/fluxdo/fluxdo/ios/Runner/SystemProxyReader.swift:67:64
+```
+
+**真根因**：`CFNetworkCopyProxiesForURL(_:proxySettings:)` 第二个参数要的是
+**`CFDictionary`（代理设置字典）**，而 `kCFAllocatorDefault` 是 **`CFAllocator`**
+——名字像、类型完全无关。11:00 轮的「语义等价」判断是错的：那是 allocator 不是设置。
+（11:00 轮另一个错也被本条覆盖：报错只有 **1 个**，此前记「两个错」是把 09:00 轮
+`nil` 桥接失效引发的**连带**推断错误当成独立缺陷。）
+
+**教训**：CF 函数带 `Copy`/第二个参数往往是**设置对象**，`kCFAllocatorDefault` 只用于
+`CFXxxCreate(allocator,...)` 这类显式带 allocator 形参的构造器。不确认签名就别猜。
+
+### 改动（1 commit，已 push）
+- [x] `ff87b235` `fix(ios14): pass nil as CFDictionary? to CFNetworkCopyProxiesForURL (step9)`
+
+```swift
+// 第二个参数是 `CFDictionary?` 的 proxySettings（可空）。
+let proxySettings: CFDictionary? = nil
+let entries = CFNetworkCopyProxiesForURL(probeURL as CFURL, proxySettings)
+  .takeRetainedValue() as? [[String: Any]]
+```
+
+- 显式声明 `CFDictionary?` 再传 `nil` → 类型合法，且让 CFNetwork 取**当前进程生效**的
+  系统代理设置（这正是本探针的语义目标）
+- **JSON 输出字段全部不变**（`count`/`systemProxyUrl`/`entries`/`type`/`probeHost`/
+  `host`/`port`/`hasPacScript`/`consistentWithSystem`），Dart 侧 `SystemProxyProbe` 无需改动
+- 引入 `CFAllocator` 到 `SystemProxyReader.swift` 的**只有注释**，调用处已无该常量
+
+### 12:00 轮 CI
+- commit `ff87b235` → run **`37882148105`**（12:04 CST 触发，最终 failure@step9）
+- 关键观察点仍是 **step 9**
+
+---
+
+## 🎯 更早（2026-10-09 11:00 CST）— 修 step9 Swift 编译阻塞（首次走到「构建 IPA」才暴露）
 
 ### 关键事实修正（09:00 轮日志的乐观结论有误）
 09:00 轮记「step7 破冰，step 8 已 in_progress，等出包」——**too early**。
-run `37873771518`(`6819d488`) 最终 **failure**，卡在 **step 9「构建未签名 IPA」**：
-- step 7「格式与静态分析」✅ **success**（裸标识符花括号根因确认修复，没再挂）
-- step 8「iOS14 兼容与 CF 回归测试」✅ **success**
-- step 9 ❌ **failure**，step 10/12/13/14 全 skipped → **仍未出包**
+run `37873771518`(`6819d488`) 最终 **failure@step 9（构建未签名 IPA）**：
+自建 Swift 文件 `ios/Runner/SystemProxyReader.swift` 编译不过。
 
-真根因是两个 **Swift 编译错误**（`ios/Runner/SystemProxyReader.swift:67-68`，
-即 `proxyProbeSnapshot()` 内，09:00 轮新加的探针代码）：
-
-```
-Swift Compiler Error (Xcode): 'nil' is not compatible with expected argument type 'CFDictionary'
-  .../ios/Runner/SystemProxyReader.swift:67:6
-Swift Compiler Error (Xcode): Cannot use optional chaining on non-optional value of type 'Unmanaged<CFArray>'
-  .../ios/Runner/SystemProxyReader.swift:68:5
-```
-
-**因果链（同一处写法引发两个错）**：`CFNetworkCopyProxiesForURL(probeURL as CFURL, nil)`
-的第二个参数是 **Autorelease（非可选）** 的 `CFDictionary`，Swift 把字面量 `nil`
-桥接成非可选 `CFDictionary` → 直接报「'nil' not compatible」。返回值随即被推断成
-**非可选** `Unmanaged<CFArray>` → 紧跟的 `?.takeRetainedValue()` 又触发
-「Cannot use optional chaining on non-optional value」。**不是** iOS 14 SDK 缺符号，
-是纯 Swift 类型推断问题。
-
-### 本轮实际改动（1 commit，已 push）
+### 本轮改动
 - [x] `b3b2029a` `fix(ios14): make SystemProxyReader compile on iOS 14 (build step9 blocker)`
-  → `CFNetworkCopyProxiesForURL(probeURL as CFURL, kCFAllocatorDefault)`
-  （用 `kCFAllocatorDefault` 替掉 `nil`：CFNetwork 自行取系统级代理设置；
-  `takeRetainedValue()` 的返回值本来就是 CF 的 +1 引用，语义与 CFNetwork 默认
-  allocator 一致，不引入额外生命周期风险）
-  → 返回值显式 `as? [[String: Any]]` 解包成**可选**，再 `guard let entries else { … }`
-  → JSON 输出字段（`count`/`systemProxyUrl`/`entries`…）**完全不变**，纯编译修复
 
-### 教训
-CI step 7/8 绿 ≠ 能出包。**09:00 轮只看 step 8 in_progress 就下结论，属于过早**。
-本分支剩余风险集中在 step 9（Xcode/Swift 编译），必须**等 step 9 结果**再判成败。
+---（更早轮次见 `note/fluxdo-攻坚-progress-log.md`）
 
-### 本轮 CI
-- commit `b3b2029a` → run **`37877390735`**（11:02 CST 触发，in_progress）
+## 📌 最近 CI 一览
 
-### 待办
-- [ ] 核对 run `37877390735` **step 9**：绿 → 等 step 10/12/13 → 记录
-      `ios14-test-<run_number>` tag 与 IPA 直链；红 → 拉 `actions/jobs/<id>/logs`，
-      **按 `file:line:col` 精确定位**（09:00 轮靠猜行号白烧一个 run）
-- [ ] 若本地无 Swift 工具链（已确认：容器无 swiftc），Swift 改动只能靠 CI 验证 → 每次
-      改 Swift 都要预留一个 run 的验证成本
-
-## 🎯 上轮（2026-10-09 09:00 CST）— 打通 CI 卡点 + 修「出口一致」假阳性 + C2 定论
-
-### 关键事实修正（上轮日志有误）
-上轮（08:00）把「最新出包」记为 `ios14-test-18` 是对的，但**此后三轮均未出包**：
-`37858290951`(`abcf9ed5`) / `37864338117`(`333cc18a`) / `37864683300`(`27c2200f`)
-/ `37867764680`(`c076fd62`) 全部 **failure@step 7「格式与静态分析」**，
-step 8/9/10/12/13/14 全 skipped。真正原因**不是** Release 403、**不是**构建：
-- `abcf9ed5`：`system_proxy_service.dart` 未使用 import（已在 `27c2200f` 修）
-- `333cc18a`：`on MissingPluginException` 漏 import → `non_type_in_catch_clause`
-- `c076fd62`：`gatewayMode=$isGatewayMode` → `unnecessary_brace_in_string_interps`
-  （**info 级 lint 也被 `--fatal-infos` 当致命**）
-
-→ 教训：**CI step 7 是本分支最常挂的一步**，而且本地跑不了 `dart analyze`
-（容器内存 ~1.2G 无 swap，analysis server 直接崩）。本地只能保证
-`dart format --set-exit-if-changed` + parse-only；**lint 必须在 CI 日志里读原始行**，
-每次核对 run 先看 step 7，挂了就 `actions/jobs/<id>/logs` 拉全文 grep `info -|error -`。
-
-### 本轮实际改动（3 commit，已 push）
-- [x] `c076fd62`：补 `package:flutter/services.dart` 的 `MissingPluginException`
-      import；去掉一处多余花括号插值
-- [x] `b45d755d`：**修「出口一致」假阳性** ——
-      iOS 14 + **本地 DoH 网关未运行**时，原来只要进程内是固定系统代理就报
-      `egressVerified=true`，可当时 WebView 与 Dart **都没走 DoH**。
-      现在 `_resolveEgressVerified(probe, isGatewayMode:)` 在网关未运行时恒 `null`；
-      debug 行补打 `gatewayMode=`
-- [x] `a55c6761`：`${isGatewayMode.toString()}` 修 CI 卡点
-- [x] `docs/ios14-webview-doh-handoff.md`：新增 **C2 可行性定论**
-
-### 路径 C2 定论（本轮调研）
-`NEPacketTunnelProvider` 在 TrollStore 下**不成立**：
-`Runner.entitlements` 无 `networkextension` entitlement；TrollStore 永久签名不走
-Apple provisioning，`nesessionmanager` 校验拿不到该 entitlement；工程无 Extension
-target；且会接管**全机**流量。**→ 剩余可行方向只有 C1**（让 DoH 出站跟随系统代理，
-靠系统代理把两通道出口拉齐），前提由 `SystemProxyProbe` 真机采样判定。
-
-### 本轮 CI
-- commit `a55c6761` → run **`37868810324`**（09:14 CST 触发，in_progress）
-- 上一批 `37867764680`(`c076fd62`) / `37864683300`(`27c2200f`) 均 **failure@step7**
-
-### 待办
-- [ ] 核对 run `37868810324` step 7/8/9/10，确认出 `ios14-test-*` + IPA 直链
-- [ ] 老板实机验证 `[DOH] 内部浏览器出口结论`：需 `gatewayMode=true`
-      **且** `egressVerified=true` 才算「两通道同经系统代理」；
-      `unknown` = 网关没跑（无意义）；`false` = PAC/直连 → 转产品层决策
-
-## 🎯 主攻目标
-
-让 iOS 14.8 的**内部浏览器（WKWebView）**流量与 Dart/rhttp/Dio 通道**走同一 DoH 出口**。
-
-## ✅ 本轮（2026-10-09 07:00 CST）— 路径 C1 实施：iOS DoH 出站跟随系统代理
-
-上轮定论：iOS 14 上 `setProxyOverride` / `shouldInterceptRequest` 双双不可用
-（证据见下节）。路径 C 是**唯一可行方向**，本轮把 C1 落地。
-
-### 修复的根因
-
-`network_settings_service.dart` 的 `_applyProxyState()`：
-
-```dart
-// 修复前：iOS 恒传 null → DoH 出站直连
-systemProxyUrl: Platform.isWindows
-    ? SystemProxyService.instance.effectiveProxyUrl
-    : null,
-```
-
-| 通道 | iOS 14 出站（修复前） |
-|---|---|
-| WKWebView（内部浏览器） | 系统代理（CFNetwork 栈） |
-| Rust DoH 网关（Dio/rhttp 出口） | **直连** ← 出口不一致的根源 |
-
-WKWebView 默认跟随系统代理，而本地 DoH 网关（`127.0.0.1:<port>`）不在系统代理里。
-iOS <17 无法用 `WKWebsiteDataStore.proxyConfigurations` 把 WebView 指向本地网关
-（那是 iOS 17 API），所以只能反向统一：**让 DoH 出站也走系统代理**。
-
-### 本轮实际改动
-
-- [x] 新增 `_systemProxyUrlForGateway()`：Windows **与 iOS** 都把
-      `SystemProxyService.effectiveProxyUrl` 交给 `GatewayUpstream.resolve`，
-      使 DoH 出站与 WKWebView 走**同一出口**。优先级不变（应用代理 > 系统代理 > 直连）；
-      VPN/TUN 模式下系统不写代理，helper 返回 null，与原行为等价。
-- [x] 新增契约测试 `test/services/network/gateway_system_proxy_source_test.dart`
-      （应用代理优先 / 系统代理回退 / null 直连 / 畸形值拒绝 / socks5 识别），
-      已加入 CI 测试列表。
-- [x] 修复 CI 假失败：Release 步骤 403（`Resource not accessible by integration`，
-      即使已授予 `contents:write` 仍**间歇性**出现）把构建全绿的 job 拖成 failure
-      （run 37841469025 / 37844039536）。改为 `continue-on-error` +
-      `RELEASE_TOKEN` 回退脚本 `.github/scripts/publish_release.sh`。
-- [x] 本地校验：`dart format --set-exit-if-changed` = 0 changed；
-      parse-only `total_errors=0`。
-      ⚠️ `flutter test` 本机跑不动（3.7G 内存 + 无 `dart:ui`）→ 交 CI 执行。
-
-### 待办
-
-- [ ] 老板实机验证：iOS 14.8 开 HTTP(S) 系统代理时，DoH 出口与 WebView 出口 IP 一致
-- [ ] 若实机仍不一致：检查 `SystemProxyReader.swift` 读到的代理是否包含 socks5 场景
-
-## 📌 上轮（2026-10-09 06:00 CST）— 路径 A/B 根因定论（已核实）
-
-
-**结论：iOS 14 上 `setProxyOverride` 与 `shouldInterceptRequest` 双双不可用，
-原 version guard 是正确的、不可放宽。**
-
-证据（均为本机 pub-cache 源码逐行核实，非推测）：
-
-| 手段 | 证据文件 | 结论 |
-|---|---|---|
-| `setProxyOverride` | `flutter_inappwebview_ios-1.2.0-beta.3/ios/.../ProxyManager.swift:9` → `@available(iOS 17.0, *)`；`InAppWebViewFlutterPlugin.swift:64-66` → `if #available(iOS 17.0, *) { proxyManager = ProxyManager(...) }` | iOS 14 上 MethodChannel **从未注册** → `MissingPluginException` 被 Dart catch 吞掉 → 静默失败。原理：底层 `WKWebsiteDataStore.proxyConfigurations` 是 iOS 17 API，**iOS 14 不存在**。 |
-| `shouldInterceptRequest` | `flutter_inappwebview_platform_interface/lib/src/in_app_webview/platform_webview.dart:1687+` → `@SupportedPlatforms` 仅列 **Android / Windows / Linux**；`flutter_inappwebview_ios/ios/**/*.swift` 内 `shouldInterceptRequest` 出现次数 = **0** | iOS 明确不支持。 |
-| `CustomSchemeHandler` | `InAppWebView.swift:705` → `setURLSchemeHandler(CustomSchemeHandler(), forURLScheme: scheme)` | 仅对**自定义 scheme** 生效，无法接管 `https://`。 |
-
-→ **路径 A（放宽 guard）与路径 B（shouldInterceptRequest）在 iOS 14 上均不可行**，
-本轮不做无意义改动，转为把结论固化并**诊断现状**，为路径 C 做准备。
-
-### 本轮实际改动
-
-- [x] 根因核实（上表），确认 guard 正确性
-- [x] `_applyWebViewProxy()` 增加 iOS 14 分支的**可诊断日志**：原来静默 `return`，
-      现在显式打印「iOS <17 无 WKWebsiteDataStore.proxyConfigurations，WebView 无法接管」
-      —— 让真机日志能直接证明「裸连」而非让排查者误以为设置成功
-- [x] 新增 `docs/ios14-webview-doh-handoff.md`：iOS 14 WebView 出口接管的
-      可行性矩阵 + 路径 C 方案设计
-
-## 📐 路径 C 方案（下一轮实施）
-
-**核心事实**：`SystemProxyReader.swift` 已能读**系统代理**，且 `rhttp` 已跟随它。
-问题在于**本地 DoH 代理不在系统代理里** → WebView 走系统出口，Dio 走本地 DoH。
-
-**方案 C1（首选）**：iOS 14 无法把 WebView 指向 127.0.0.1。
-剩余可行手段 = **让 DoH 出站本身经由系统代理**，使「Dio→本地DoH→系统代理→出口」
-与「WebView→系统代理→出口」**出口 IP 一致**。
-→ 检查 `GatewayUpstream.resolve` 在 iOS 是否已把系统代理传给 Rust 网关。
-
-**方案 C2**：若 C1 不成立，改 `SystemProxyService` 在 iOS 上不仅读取、
-还尝试用 `CFNetworkCopySystemProxySettings` 的**写侧等价物**（App 进程内无可写 API）
-—— 需先证实 iOS 无 per-process proxy 写入能力，再判定是否需要 VPN/NEPacketTunnel。
-
-## 📋 待办
-
-- [x] ~~核对 CI run `37838762957`（commit `b1a5e341`）step 9/10~~ → **全绿**：
-      格式✅ 兼容✅ **构建未签名 IPA ✅ 上传已检查的测试包 ✅**（2026-10-09 06:00 轮核对）
-- [x] **路径 C1：iOS DoH 出站跟随系统代理** ✅ 本轮完成（见上）
-- [ ] 老板实机验证：内部浏览器是否走 DoH 出口（**出口采样日志已就绪**：看 `[DOH] 内部浏览器出口采样` 的 `exitIsSystemProxy`）
-- [x] 里程碑 tag：**Release `ios14-test-18`**（commit `cbb44e38`，路径 C1）已发布，含 IPA 直链
-
-## 本轮 CI（2026-10-09 07:00 CST）
-
-- **上轮 run `37852245336`（commit `cbb44e38`，路径 C1）→ `completed success` 全绿**：
-  step 7 格式✅ / 8 兼容与回归✅ / 9 构建 IPA✅ / 10 上传✅ / **13 发布 Release✅**
-  → 此前「Release 403 假失败」的修复（`cbb44e38` 内）已生效。
-- **产物**：Release **`ios14-test-18`**，IPA
-  `fluxdo-ios14-test-18-cbb44e38.ipa`（54.8 MB）
-  → https://github.com/longxiang1002/fluxdo/releases/download/ios14-test-18/fluxdo-ios14-test-18-cbb44e38.ipa
-- 本轮 commit `abcf9ed5` → 新 run **`37858290951`**（07:14 CST 触发，queued，下轮核对）。
-
-## 🎯 本轮改造（2026-10-09 07:00 CST）：WebView 出口采样器
-
-**动机**：路径 C1 只是「让 DoH 出站跟随系统代理」，但**从未证明
-WKWebView 真的走系统代理**。`SystemProxyReader` 读的是**系统设置**，
-读得到 ≠ App 进程内出口就被它决定（PAC-only / 进程内另有代理配置时不成立）。
-本轮把「前提」变成**可实证的采样**，避免拿假设当结论。
-
-- [x] `ios/Runner/SystemProxyReader.swift`：`proxyProbeSnapshot()` —
-      `CFNetworkCopyProxiesForURL` 读**本 App 进程真实生效**的代理；
-      只回固定字段（type/host/port/hasPacScript/pacIsRemote/consistentWithSystem），
-      **不含脚本 URL 与正文、不含凭据**
-- [x] `ios/Runner/AppDelegate.swift`：在既有 `com.fluxdo/system_proxy` channel
-      上增加 `proxyProbe` 方法（不新增 channel）
-- [x] `lib/services/network/system_proxy_service.dart`：`SystemProxyProbe` 模型 +
-      `probeEffectiveProxy()` + `exportJson()` + 脱敏 `describe()`；
-      `effectiveExitIsSystemProxy` 判定（true/false/null 三态，无条目不冒充成功）
-- [x] `lib/pages/webview_page.dart`：`onLoadStop` 每次导航采样一次并打日志
-- [x] `lib/pages/ios14_diagnostics_page.dart`：脱敏报告附带 `webviewExitProbe`
-- [x] `test/services/network/webview_exit_probe_test.dart`（新增 8 例，本地全过），
-      已加入 CI 测试列表；`ios14_diagnostics_page_test.dart` 适配
-- [x] commit `abcf9ed5` 已 push，CI run `37858290951` 已触发
-
-**测试抓到的真实 bug（已修）**：`describe()` 用 `entries.join(',')` 打出
-`Instance of 'SystemProxyProbeEntry'`（核心证据不可读）→ 补 `toString()` +
-断言 `isNot(contains('Instance of'))`；`pacIsRemote` 用例漏传 → 补断言后修正。
-
-**下一步（交给验收）**：老板实机开内部浏览器，看日志
-`[DOH] 内部浏览器出口采样: ... exitIsSystemProxy=?`
-- `true` → 路径 C 前提成立，两通道出口同源；
-- `false`（PAC/直连）→ 路径 C 不足以统一出口，转 `NEPacketTunnelProvider`
-  或「WebView 侧跟随 DoH」方向。
-
-## 本轮 CI（2026-10-09 07:00 CST）
-
-- 核对上轮两 run：`37844039536`(`0c7aad6d`) 与 `37841469025`(`58a2411e`)
-  → **均为 failure，但构建/格式/测试步全绿（step 7/8/9/10 ✅），
-  仅 step 12「发布 GitHub Release」403 失败** → 本轮已修（continue-on-error + 回退）。
-- 本轮 commit → 触发新 run（见 progress log）。
-
-## 📌 上轮 CI（已关闭）
-
-- commit `0c7aad6d` → run `37844039536`：构建全绿，Release 步 403（本轮已修）
-- commit `58a2411e` → run `37841469025`：同上
+| run id | commit | 北京时间 | 结果 |
+|---|---|---|---|
+| `37887902403` | `64ddaaa0` | 10-09 13:17 | in_progress（本轮触发时仍未完） |
+| `37886570564` | `64ddaaa0` | 10-09 13:01 | ✅ **success（出包）** |
+| `37882148105` | `ff87b235` | 10-09 12:04 | ❌ failure@step 9 |
+| `37877390735` | `b3b2029a` | 10-09 11:02 | ❌ failure@step 9 |
+| `37873771518` | `6819d488` | 10-09 10:16 | ❌ failure@step 9 |
 
 ## 🚫 硬性禁令（老板实机确认的回归，违反即回滚）
 
