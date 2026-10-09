@@ -81,9 +81,10 @@ class _WebViewPageState extends ConsumerState<WebViewPage> {
   /// **本 App 进程确实走系统代理**——`SystemProxyReader` 读的是系统设置，
   /// 不等于 WebView 实际出口。这里在真实导航时采样一次，把前提直接钉在日志里。
   ///
-  /// 仅 iOS 且出错不影响导航：失败时 `describe()` 之外不抛。
+  /// iOS / macOS 均采样（两平台都把「WebView 出口跟随系统代理」当作出口统一的
+  /// 前提，见 `_systemProxyUrlForGateway()`），出错不影响导航：失败时不抛。
   Future<void> _logWebViewExitConsistency() async {
-    if (!io.Platform.isIOS) return;
+    if (!io.Platform.isIOS && !io.Platform.isMacOS) return;
     final revision = _navigationRevision;
     if (_exitConsistencyRevision == revision) return;
     _exitConsistencyRevision = revision;

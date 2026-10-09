@@ -286,9 +286,17 @@ class SystemProxyService {
   /// [effectiveProxyUrl]（DoH 网关出站依据）比对，即可判定两通道出口是否一致。
   ///
   /// 只返回固定字段，无 URL、无凭据、无 PAC 脚本正文。
-  /// 非 iOS 平台返回 `null`（Android/桌面不适用该判定）。
+  ///
+  /// 可用平台为 **iOS 与 macOS**（原生 side 由
+  /// `CFNetworkCopySystemProxySettings` / `CFNetworkCopyProxiesForURL` 实现，
+  /// 两者在 iOS 与 macOS 上均可用）；Android / Windows / Linux 返回 `null`。
+  ///
+  /// 与 [NetworkSettingsService] 里 `_resolveEgressVerified` 的分工：
+  /// 那个静态判定**只对 iOS 生效**（因为只有 iOS<17 存在「进程内无法指定
+  /// WebView 代理」的约束，macOS 路径见 `_systemProxyUrlForGateway`），
+  /// 本方法只负责取证据、不含任何结论。
   Future<SystemProxyProbe?> probeEffectiveProxy() async {
-    if (!Platform.isIOS) return null;
+    if (!Platform.isIOS && !Platform.isMacOS) return null;
     try {
       final raw = await _iosChannel.invokeMethod<Map<Object?, Object?>>(
         'proxyProbe',
