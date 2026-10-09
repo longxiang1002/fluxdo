@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:flutter_inappwebview/flutter_inappwebview.dart' as inappwebview;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -1046,7 +1047,7 @@ class NetworkSettingsService {
     DohRouteDiagnostics.instance.setDohEgressVerified(verified);
     debugPrint(
       '[DOH] 内部浏览器出口结论: state=${webViewProxyState} '
-      'egressVerified=${verified ?? "unknown"} '
+      'egressVerified=${verified ?? 'unknown'} '
       'systemProxy=${probe?.systemProxyUrl ?? "none"} '
       'webViewProxyAttempted=$_webViewProxyAttempted',
     );
