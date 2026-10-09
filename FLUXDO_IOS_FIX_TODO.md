@@ -3,7 +3,56 @@
 > 分支 `fix/ios14-network-thermal`。每轮必须动手改代码，写完记 CI 结果。
 > **2026-10-09 起方向切换**：发热/过盾暂缓，唯一主攻 = **DoH 代理接管内部浏览器流量**。
 
-## 🎯 本轮（2026-10-09 09:00 CST）— 打通 CI 卡点 + 修「出口一致」假阳性 + C2 定论
+## 🎯 本轮（2026-10-09 11:00 CST）— 修 step9 Swift 编译阻塞（首次走到「构建 IPA」才暴露）
+
+### 关键事实修正（09:00 轮日志的乐观结论有误）
+09:00 轮记「step7 破冰，step 8 已 in_progress，等出包」——**too early**。
+run `37873771518`(`6819d488`) 最终 **failure**，卡在 **step 9「构建未签名 IPA」**：
+- step 7「格式与静态分析」✅ **success**（裸标识符花括号根因确认修复，没再挂）
+- step 8「iOS14 兼容与 CF 回归测试」✅ **success**
+- step 9 ❌ **failure**，step 10/12/13/14 全 skipped → **仍未出包**
+
+真根因是两个 **Swift 编译错误**（`ios/Runner/SystemProxyReader.swift:67-68`，
+即 `proxyProbeSnapshot()` 内，09:00 轮新加的探针代码）：
+
+```
+Swift Compiler Error (Xcode): 'nil' is not compatible with expected argument type 'CFDictionary'
+  .../ios/Runner/SystemProxyReader.swift:67:6
+Swift Compiler Error (Xcode): Cannot use optional chaining on non-optional value of type 'Unmanaged<CFArray>'
+  .../ios/Runner/SystemProxyReader.swift:68:5
+```
+
+**因果链（同一处写法引发两个错）**：`CFNetworkCopyProxiesForURL(probeURL as CFURL, nil)`
+的第二个参数是 **Autorelease（非可选）** 的 `CFDictionary`，Swift 把字面量 `nil`
+桥接成非可选 `CFDictionary` → 直接报「'nil' not compatible」。返回值随即被推断成
+**非可选** `Unmanaged<CFArray>` → 紧跟的 `?.takeRetainedValue()` 又触发
+「Cannot use optional chaining on non-optional value」。**不是** iOS 14 SDK 缺符号，
+是纯 Swift 类型推断问题。
+
+### 本轮实际改动（1 commit，已 push）
+- [x] `b3b2029a` `fix(ios14): make SystemProxyReader compile on iOS 14 (build step9 blocker)`
+  → `CFNetworkCopyProxiesForURL(probeURL as CFURL, kCFAllocatorDefault)`
+  （用 `kCFAllocatorDefault` 替掉 `nil`：CFNetwork 自行取系统级代理设置；
+  `takeRetainedValue()` 的返回值本来就是 CF 的 +1 引用，语义与 CFNetwork 默认
+  allocator 一致，不引入额外生命周期风险）
+  → 返回值显式 `as? [[String: Any]]` 解包成**可选**，再 `guard let entries else { … }`
+  → JSON 输出字段（`count`/`systemProxyUrl`/`entries`…）**完全不变**，纯编译修复
+
+### 教训
+CI step 7/8 绿 ≠ 能出包。**09:00 轮只看 step 8 in_progress 就下结论，属于过早**。
+本分支剩余风险集中在 step 9（Xcode/Swift 编译），必须**等 step 9 结果**再判成败。
+
+### 本轮 CI
+- commit `b3b2029a` → run **`37877390735`**（11:02 CST 触发，in_progress）
+
+### 待办
+- [ ] 核对 run `37877390735` **step 9**：绿 → 等 step 10/12/13 → 记录
+      `ios14-test-<run_number>` tag 与 IPA 直链；红 → 拉 `actions/jobs/<id>/logs`，
+      **按 `file:line:col` 精确定位**（09:00 轮靠猜行号白烧一个 run）
+- [ ] 若本地无 Swift 工具链（已确认：容器无 swiftc），Swift 改动只能靠 CI 验证 → 每次
+      改 Swift 都要预留一个 run 的验证成本
+
+## 🎯 上轮（2026-10-09 09:00 CST）— 打通 CI 卡点 + 修「出口一致」假阳性 + C2 定论
 
 ### 关键事实修正（上轮日志有误）
 上轮（08:00）把「最新出包」记为 `ios14-test-18` 是对的，但**此后三轮均未出包**：

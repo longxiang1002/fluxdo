@@ -264,3 +264,187 @@ failure@step7（`non_type_in_catch_clause`）。
    - `[DOH] 内部浏览器出口结论: ... egressVerified=? gatewayMode=?`
    只有 `gatewayMode=true` 且 `egressVerified=true` 才说明「两通道同经系统代理」；
    `egressVerified=unknown` = 网关没跑（无意义）；`false` = PAC/直连 → 转产品层决策。
+
+---
+
+## 2026-10-09 10:00 CST · 第 N 轮（DoH 接管内部浏览器）
+
+**方向**：DoH 接管内部浏览器（WebView）。本轮聚焦「解开 CI step7 死循环」+「永久关掉
+D 路径（https scheme handler）」。
+
+### 1. 找到 CI step7 连续失败的**真正根因**（此前 4 轮都在治错地方）
+
+- `37868810324`(`a55c6761`) step7 唯一报错：
+  `network_settings_service.dart:1057:31 - unnecessary_brace_in_string_interps`
+- 上一轮我改的是 **1059 行的 `gatewayMode`**（把双引号换单引号）——**改错了行**，
+  所以 `37872559447`(`1e0bc30a`) step7 **一模一样地再挂**
+  （日志逐字相同：`1057:31`）。
+- 用 Python 逐字符定位 1057 行第 31 列：
+  ```
+  1057: '[DOH] 内部浏览器出口结论: state=${webViewProxyState} '
+                                 ^ col 31 是 $，紧跟的 { 在 col 32
+  ```
+  → 命中的是 **`${webViewProxyState}`**：内层是**裸标识符**，这正是该 lint 的定义
+  （裸标识符不该加花括号）。与 `gatewayMode` 那行无关。
+- **教训**：lint 报的是 `line:col`，必须按行列精确定位，不能靠"最近我改过的那行"
+  猜。上一轮凭印象改，白烧一个 run。
+
+### 2. 本轮改动（1 commit，已 push）
+
+- `6819d488` `fix(ios14): drop braces around bare identifier interpolation`
+  → `state=${webViewProxyState}` 改为 `state=$webViewProxyState`
+  （与相邻的 `$probe` / `$_webViewProxyAttempted` 风格一致，日志输出完全不变）
+
+### 3. 本地全量自查（覆盖 CI step7 会 lint 的全部 31 个文件）
+
+- `git diff --name-only --diff-filter=ACMR <step7 基线 e1bd839e> HEAD -- '*.dart'` =
+  **31 个文件**（CI 脚本就是这么取的）
+- `dart format --output=none --set-exit-if-changed <31 files>` → **0 changed** ✅
+- 正则扫 `\$\{裸标识符\}` → **全仓 0 命中** ✅
+- 正则扫「单引号串内插值里含双引号字面量」→ 19 处，但 **1059 行已被上轮改成
+  单引号**、其余是既有且一直是绿的写法 → 判断为安全
+- ⚠️ 本地仍跑不了 `dart analyze`（容器约 1.2G 内存，analysis server 崩），
+  lint 只能靠 CI 日志复核
+
+### 4. 路径 D 永久排除（源码级 + Apple 文档级，不再重复调研）
+
+**结论：iOS 上任何 WKWebView 都**不可能**用 `setURLSchemeHandler` 接管 `https`。**
+这不只是"本库没实现"，而是 WebKit 的硬约束：
+
+1. **Apple 官方文档**（`WKWebViewConfiguration.setURLSchemeHandler(_:forURLScheme:)`）：
+   > It is a programmer error to register a handler for a scheme WebKit already
+   > handles, such as `https`, and this method raises an `NSException`
+   > (`invalidArgumentException`) if you try to do so.
+   → 对 `https` 调该方法 = **直接抛异常崩溃**，不是静默失败。
+2. **Dart 侧本库主动 assert 拦截**（`in_app_webview_settings.dart:3487`，两个类各一处）：
+   `assert(!resourceCustomSchemes.contains("http") && !contains("https"))`
+   → 作者已知此约束，**绝不能绕过**。
+3. **iOS 原生侧无过滤**（`InAppWebView.swift:703-706`）：scheme 直接透传给
+   `setURLSchemeHandler` → 绕过 Dart assert 必然触发证据 1 的 NSException。
+4. **本库自带判定入口印证**（`InAppWebViewManager.swift:36-42`）：暴露
+   `WKWebView.handlesURLScheme(urlScheme)`；`https` 恒 true =「WebKit 自己处理」。
+
+→ 路径 B（把 WebView 请求交 Dart 经本地 DoH 代发）在 iOS 上**架构性不成立**：
+   WebKit 不提供任何 App 可挂载的 `https` 请求钩子
+   （`shouldInterceptRequest` 无 iOS 实现、scheme handler 对 `https` 非法、
+   `WKContentRuleList` 只阻断不改写、`proxyConfigurations` 是 iOS 17 API）。
+→ 已写入 `docs/ios14-webview-doh-handoff.md`「D 路径定论」章节。
+→ **剩余唯一路径仍只有 C1**（DoH 出站跟随系统代理 → 两通道出口 IP 一致）。
+
+### 5. 本轮 CI
+
+- commit `6819d488` → run **`37873771518`**（10:16 CST 触发，in_progress）
+- 已挂（待本轮修复验证）：`37872559447`(`1e0bc30a`) / `37868810324`(`a55c6761`)
+  / `37869683410`(`0c90792f`) 均 **failure@step7**
+
+### 下一步
+
+1. 核对 run `37873771518` step7 是否终于转绿；绿则等 step 8/9/10/13 出包，
+   确认 `ios14-test-*` tag 与 IPA 直链。
+2. step7 若**再**挂：先拉 `actions/jobs/<id>/logs`，用**行列号精确**定位新报错
+   （本轮教训），别再凭印象改行。
+3. 出包后交老板实机：装 IPA → 开内部浏览器 → 看
+   `[DOH] 内部浏览器出口结论: ... egressVerified=? gatewayMode=?`，
+   需 `gatewayMode=on` 且 `egressVerified=true` 才算「两通道同经系统代理」。
+
+### ✅ step7 破冰（10:26 CST 确认）
+
+run `37873771518`(`6819d488`) **step 7「格式与静态分析」= completed success**，
+step 8 已 in_progress —— 连续 4 个 run 卡在这里（`37858290951` / `37864338117` /
+`37864683300` / `37867764680` / `37868810324` / `37872559447`）的 CI 死循环**已解开**。
+根因就是 `${webViewProxyState}` 裸标识符花括号（1057:31），非 `gatewayMode` 行。
+→ 继续等 step 8/9/10/12/13/14，出包后记录 `ios14-test-*` 与 IPA 直链。
+
+---
+
+## 2026-10-09 11:00 CST · 第 N+1 轮（DoH 接管内部浏览器）
+
+**方向**：DoH 接管内部浏览器（WebView）。本轮**首次走到 step 9**，暴露出真正的出包阻塞
+（此前 6 个 run 都停在 step 7，误以为 step 7 修好就万事大吉）。
+
+### 1. 事实修正：09:00 轮的「破冰」结论过早
+
+run `37873771518`(`6819d488`) 最终 **failure**：
+
+| step | 名称 | 结果 |
+|---|---|---|
+| 7 | 格式与静态分析 | ✅ success（裸标识符花括号根因确已修复） |
+| 8 | iOS14 兼容与 CF 回归测试 | ✅ success |
+| 9 | **构建未签名 IPA** | ❌ **failure** |
+| 10/12/13/14 | 上传/重命名/发布 Release | skipped |
+
+→ **仍未出包**。09:00 轮日志「step 8 已 in_progress，等出包」的判断是**基于中间态
+的乐观推断**，应记为「待观察」而非「已破冰出包」。
+
+### 2. step 9 真根因：`SystemProxyReader.swift` 两个 Swift 编译错误
+
+日志原文（`actions/jobs/113637504100/logs` 第 1643-1650 行）：
+
+```
+Swift Compiler Error (Xcode): 'nil' is not compatible with expected argument type 'CFDictionary'
+  .../ios/Runner/SystemProxyReader.swift:67:6
+Swift Compiler Error (Xcode): Cannot use optional chaining on non-optional value of type 'Unmanaged<CFArray>'
+  .../ios/Runner/SystemProxyReader.swift:68:5
+```
+
+出错代码（09:00 轮新加的 `proxyProbeSnapshot()` 内）：
+
+```swift
+guard let entries = CFNetworkCopyProxiesForURL(
+  probeURL as CFURL,
+  nil                       // ← 错 1
+)?.takeRetainedValue() as? [[String: Any]] else {   // ← 错 2
+```
+
+**因果链**：`CFNetworkCopyProxiesForURL` 的第二个参数在 Swift 里是
+**Autorelease 的 `CFDictionary`（非可选）**。传字面量 `nil` 时 Swift 把它桥接成
+非可选 `CFDictionary` → 报「'nil' is not compatible」。由于参数已非法，编译器把
+**返回值也推断成非可选** `Unmanaged<CFArray>` → 后面跟 `?.` 就报
+「Cannot use optional chaining on non-optional value」。
+**两个错是同一处写法引发的，不是两个独立缺陷。**
+（另注：`CFNetworkCopyProxiesForURL` 标注 `CF_RETURNS_RETAINED`，所以
+`takeRetainedValue()` 本身没错，错在 `?.` 与非可选返回值的组合。）
+
+### 3. 本轮改动（1 commit，已 push）
+
+- `b3b2029a` `fix(ios14): make SystemProxyReader compile on iOS 14 (build step9 blocker)`
+
+```swift
+// 第二个参数是 Autorelease 的 proxySettings；本项目一律用系统级设置，
+// 传 kCFAllocatorDefault 交给 CFNetwork 自己取系统配置。
+let entries = CFNetworkCopyProxiesForURL(probeURL as CFURL, kCFAllocatorDefault)
+  .takeRetainedValue() as? [[String: Any]]
+
+guard let entries else {
+  return [
+    "count": 0,
+    "systemProxyUrl": systemProxyUrl as Any,
+  ]
+}
+```
+
+- `nil` → `kCFAllocatorDefault`（CFNetwork 自行取系统级代理设置，语义等价且类型合法）
+- 返回值显式 `as? [[String: Any]]` → 变成可选，`guard let` 处理空值
+- **JSON 输出字段（`count` / `systemProxyUrl` / `entries` / `type` / `probeHost` /
+  `host` / `port` / `hasPacScript` / `consistentWithSystem`）全部不变**，纯编译修复，
+  Dart 侧 `SystemProxyProbe.fromChannel` 无需改动
+- ⚠️ 本地**无 Swift 工具链**（已确认容器无 `swiftc`、无 CoreFoundation 头文件），
+  只能靠 CI 验证 → 每次改 Swift 都要预留一个 run 的验证成本
+- iOS 14 目标不变（`IPHONEOS_DEPLOYMENT_TARGET = 14.0`、`platform :ios, '14.0'`、
+  `SWIFT_VERSION = 5.0`），本改动不含任何需要更高部署目标的 API
+
+### 4. 本轮 CI
+
+- commit `b3b2029a` → run **`37877390735`**（11:02 CST 触发，in_progress）
+- 关键观察点：**step 9**。绿 → 等 10/12/13/14 出 `ios14-test-*` + IPA 直链；
+  红 → 立刻 `actions/jobs/<id>/logs`，**按 `file:line:col` 精确定位**。
+
+### 下一步
+
+1. 轮内轮询 `37877390735`（最多等到接近 timeout）。
+2. 出包后交老板实机：装 IPA → 开内部浏览器 → 看
+   `[DOH] 内部浏览器出口结论: ... egressVerified=? gatewayMode=?`，
+   需 `gatewayMode=on` 且 `egressVerified=true` 才算「两通道同经系统代理」。
+3. 若 step 9 再挂：优先怀疑另外几个自建 Swift 文件
+   （`DohProxyCertHandler.swift` / `MediaTranscodeHandler.swift` / `PublicFileHandler.swift`），
+   同样拉全文日志按行列号定位。
