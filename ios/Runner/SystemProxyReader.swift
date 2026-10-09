@@ -63,9 +63,14 @@ import Foundation
     let probeURL = URL(string: "https://example.invalid/")!
     let systemProxyUrl = effectiveProxyUrl
 
-    // 第二个参数是 Autorelease 的 proxySettings；本项目一律用系统级设置，
-    // 传 kCFAllocatorDefault 交给 CFNetwork 自己取系统配置。
-    let entries = CFNetworkCopyProxiesForURL(probeURL as CFURL, kCFAllocatorDefault)
+    // 第二个参数是 `CFDictionary?` 的 proxySettings（可空）。
+    // 显式声明为可选 `CFDictionary?` 再传 nil，既满足类型要求，
+    // 又让 CFNetwork 自行取当前进程生效的系统级代理配置。
+    // ⚠️ 切勿在此传 `kCFAllocatorDefault`（那是 CFAllocator，不是 CFDictionary，
+    //     CI 报 "Cannot convert value of type 'CFAllocator' to expected argument type
+    //     'CFDictionary'"）。allocator 用 CFNetwork 默认即可。
+    let proxySettings: CFDictionary? = nil
+    let entries = CFNetworkCopyProxiesForURL(probeURL as CFURL, proxySettings)
       .takeRetainedValue() as? [[String: Any]]
 
     guard let entries else {
