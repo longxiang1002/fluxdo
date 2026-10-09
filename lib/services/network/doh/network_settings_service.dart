@@ -1056,7 +1056,7 @@ class NetworkSettingsService {
     debugPrint(
       '[DOH] 内部浏览器出口结论: state=${webViewProxyState} '
       'egressVerified=${verified ?? 'unknown'} '
-      'gatewayMode=${isGatewayMode.toString()} '
+      'gatewayMode=${isGatewayMode ? "on" : "off"} '
       'systemProxy=${probe?.systemProxyUrl ?? "none"} '
       'webViewProxyAttempted=$_webViewProxyAttempted',
     );
