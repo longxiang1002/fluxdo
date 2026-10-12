@@ -83,6 +83,20 @@ jobs:
           grep '_doh_proxy_start_with_config_json' "$RUNNER_TEMP/runner-symbols.txt"
           mkdir -p "$RUNNER_TEMP/ios14-package/Payload"
           cp -R build/ios/iphoneos/Runner.app "$RUNNER_TEMP/ios14-package/Payload/"
+
+          # 让设备上「设置 → 通用 → 关于本机」显示的小版本号带 .001 后缀，
+          # 便于区分每次安装（老板要求 app 版本 = 0.2.28.001）。
+          # Flutter 只接受三段式 versionName（0.2.28.001 会解析失败），故
+          # pubspec 保持 0.2.28，这里在打包前改写 Runner.app 内 Info.plist 的
+          # CFBundleShortVersionString。CFBundleVersion（内部版本号）保持
+          # 递增（--build-number 由当前时间生成），TrollStore 覆盖安装不受影响。
+          APP_VERSION_SUFFIX="${APP_VERSION_SUFFIX:-001}"
+          APP_PLIST="$RUNNER_TEMP/ios14-package/Payload/Runner.app/Info.plist"
+          BASE_VER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PLIST")
+          NEW_VER="${BASE_VER}.${APP_VERSION_SUFFIX}"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${NEW_VER}" "$APP_PLIST"
+          echo "app 显示版本: ${BASE_VER} -> ${NEW_VER}"
+
           (cd "$RUNNER_TEMP/ios14-package" && zip -qry "$GITHUB_WORKSPACE/dist/fluxdo-ios14-test-unsigned.ipa" Payload)
           python3 scripts/ci/inspect_ios14_ipa.py dist/fluxdo-ios14-test-unsigned.ipa --output dist/ipa-inspection.json
           (cd dist && shasum -a 256 fluxdo-ios14-test-unsigned.ipa > SHA256SUMS.txt)
