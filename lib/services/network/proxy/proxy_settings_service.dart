@@ -68,16 +68,22 @@ class ProxySettings {
 
   /// 是否启用上游代理
   final bool enabled;
+
   /// 上游代理协议
   final UpstreamProxyProtocol protocol;
+
   /// 上游代理服务器地址
   final String host;
+
   /// 上游代理服务器端口
   final int port;
+
   /// 用户名（可选）
   final String? username;
+
   /// 密码（可选）
   final String? password;
+
   /// Shadowsocks 加密算法
   final String cipher;
 
@@ -249,27 +255,32 @@ class ProxySettingsService {
     _touch();
   }
 
-  Future<ProxyTestResult> testCurrentAvailability() {
-    return testAvailability(current);
+  Future<ProxyTestResult> testCurrentAvailability({int? gatewayPort}) {
+    return testAvailability(current, gatewayPort: gatewayPort);
   }
 
-  Future<ProxyTestResult> testAvailability(ProxySettings settings) {
+  Future<ProxyTestResult> testAvailability(
+    ProxySettings settings, {
+    int? gatewayPort,
+  }) {
     final inFlight = _activeTest;
     if (inFlight != null) {
       return inFlight;
     }
 
-    final future = _runAvailabilityTest(settings);
+    final future = _runAvailabilityTest(settings, gatewayPort: gatewayPort);
     _activeTest = future;
     isTesting.value = true;
-    future.then((result) {
-      testResultNotifier.value = result;
-    }).whenComplete(() {
-      if (identical(_activeTest, future)) {
-        _activeTest = null;
-      }
-      isTesting.value = false;
-    });
+    future
+        .then((result) {
+          testResultNotifier.value = result;
+        })
+        .whenComplete(() {
+          if (identical(_activeTest, future)) {
+            _activeTest = null;
+          }
+          isTesting.value = false;
+        });
     return future;
   }
 
@@ -282,7 +293,10 @@ class ProxySettingsService {
     notifier.value = notifier.value.copyWith();
   }
 
-  Future<ProxyTestResult> _runAvailabilityTest(ProxySettings settings) async {
+  Future<ProxyTestResult> _runAvailabilityTest(
+    ProxySettings settings, {
+    int? gatewayPort,
+  }) async {
     final targetUri = Uri.parse(AppConstants.baseUrl);
     final now = DateTime.now();
     if (!settings.hasServer) {
@@ -308,12 +322,22 @@ class ProxySettingsService {
           testedAt: now,
         );
       }
-      return ProxyTestResult(
-        success: true,
-        summary: S.current.proxy_ssSaved,
-        detail: S.current.proxy_ssSavedDetail,
-        targetUrl: targetUri.toString(),
-        testedAt: now,
+      // Shadowsocks 由本地 Rust 网关承载，Dart 侧无法直接说 SS 协议。
+      // 若拿到本地网关端口，就经它做一次真实的 CONNECT + TLS + 请求，
+      // 让「测试」代表「真的能通」，而不是仅仅「格式校验通过」。
+      if (gatewayPort == null || gatewayPort <= 0) {
+        return ProxyTestResult(
+          success: true,
+          summary: S.current.proxy_ssSaved,
+          detail: S.current.proxy_ssSavedDetail,
+          targetUrl: targetUri.toString(),
+          testedAt: now,
+        );
+      }
+      return _runShadowsocksGatewayTest(
+        settings,
+        targetUri: targetUri,
+        gatewayPort: gatewayPort,
       );
     }
 
@@ -327,11 +351,29 @@ class ProxySettingsService {
     SecureSocket? secureSocket;
 
     try {
-      socket = await Socket.connect(
-        settings.host,
-        settings.port,
-        timeout: timeout,
-      );
+      // 第一跳：连到代理服务器本身。这一步失败属于「网络层不可达/被重置」，
+      // 与「代理可达但握手/认证/CONNECT 失败」是两类问题，必须区分开报，
+      // 否则用户只会看到一句 "Connection reset by peer" 无法判断该查网络还是查配置。
+      try {
+        socket = await Socket.connect(
+          settings.host,
+          settings.port,
+          timeout: timeout,
+        );
+      } on SocketException catch (error) {
+        stopwatch.stop();
+        return ProxyTestResult(
+          success: false,
+          summary: S.current.proxy_cannotConnect,
+          detail:
+              '无法连接代理服务器 ${settings.host}:${settings.port}（网络层不可达或被重置）：'
+              '${error.message}。若为境外明文 SOCKS5，可能被运营商/线路 RST，'
+              '请改用加密上游（如 Shadowsocks）或让系统 VPN 承载。',
+          targetUrl: targetUri.toString(),
+          testedAt: DateTime.now(),
+          latency: stopwatch.elapsed,
+        );
+      }
 
       switch (settings.protocol) {
         case UpstreamProxyProtocol.http:
@@ -369,7 +411,8 @@ class ProxySettingsService {
       return ProxyTestResult(
         success: true,
         summary: S.current.proxy_testSuccess,
-        detail: '已通过 ${settings.protocol.displayName} 代理访问 ${targetUri.host}，HTTP $statusCode',
+        detail:
+            '已通过 ${settings.protocol.displayName} 代理访问 ${targetUri.host}，HTTP $statusCode',
         targetUrl: targetUri.toString(),
         testedAt: DateTime.now(),
         latency: stopwatch.elapsed,
@@ -410,7 +453,130 @@ class ProxySettingsService {
       return ProxyTestResult(
         success: false,
         summary: S.current.proxy_cannotConnect,
-        detail: error.message,
+        detail:
+            '已连上代理服务器，但通过它访问 ${targetUri.host} 时连接被重置/中断：'
+            '${error.message}。这通常是代理服务器拒绝转发或线路干扰，'
+            '请确认该节点能直连目标网站，或改用加密上游。',
+        targetUrl: targetUri.toString(),
+        testedAt: DateTime.now(),
+        latency: stopwatch.elapsed,
+      );
+    } catch (error) {
+      stopwatch.stop();
+      return ProxyTestResult(
+        success: false,
+        summary: S.current.proxy_testFailed,
+        detail: error.toString(),
+        targetUrl: targetUri.toString(),
+        testedAt: DateTime.now(),
+        latency: stopwatch.elapsed,
+      );
+    } finally {
+      try {
+        secureSocket?.destroy();
+      } catch (_) {}
+      try {
+        socket?.destroy();
+      } catch (_) {}
+    }
+  }
+
+  /// 经本地 Rust 网关对 Shadowsocks 上游做一次真实的端到端可用性测试。
+  ///
+  /// 网关在 127.0.0.1:[gatewayPort] 监听，接受 HTTP CONNECT 并把它转发到 SS 上游。
+  /// 这与应用真实请求走的是同一条链路，因此测试结果可信：
+  /// 只有真正完成 CONNECT + TLS + HTTP 响应才算通过。
+  Future<ProxyTestResult> _runShadowsocksGatewayTest(
+    ProxySettings settings, {
+    required Uri targetUri,
+    required int gatewayPort,
+  }) async {
+    final timeout = const Duration(seconds: 8);
+    final authorityPort = targetUri.hasPort
+        ? targetUri.port
+        : (targetUri.scheme == 'https' ? 443 : 80);
+    final authority = '${targetUri.host}:$authorityPort';
+    final stopwatch = Stopwatch()..start();
+    Socket? socket;
+    SecureSocket? secureSocket;
+    try {
+      try {
+        socket = await Socket.connect(
+          InternetAddress.loopbackIPv4,
+          gatewayPort,
+          timeout: timeout,
+        );
+      } on SocketException catch (error) {
+        stopwatch.stop();
+        return ProxyTestResult(
+          success: false,
+          summary: S.current.proxy_cannotConnect,
+          detail:
+              '无法连接本地代理网关 127.0.0.1:$gatewayPort：${error.message}。'
+              '请稍候重试或重新开启上游代理。',
+          targetUrl: targetUri.toString(),
+          testedAt: DateTime.now(),
+          latency: stopwatch.elapsed,
+        );
+      }
+
+      await _establishHttpTunnel(
+        socket,
+        settings,
+        authority: authority,
+        timeout: timeout,
+      );
+      secureSocket = await SecureSocket.secure(
+        socket,
+        host: targetUri.host,
+      ).timeout(timeout);
+      final statusCode = await _requestAvailability(
+        secureSocket,
+        targetUri,
+        timeout: timeout,
+      );
+      stopwatch.stop();
+      return ProxyTestResult(
+        success: true,
+        summary: S.current.proxy_testSuccess,
+        detail: '已通过 Shadowsocks（经本地网关）访问 ${targetUri.host}，HTTP $statusCode',
+        targetUrl: targetUri.toString(),
+        testedAt: DateTime.now(),
+        latency: stopwatch.elapsed,
+        statusCode: statusCode,
+      );
+    } on TimeoutException {
+      stopwatch.stop();
+      return ProxyTestResult(
+        success: false,
+        summary: S.current.proxy_testTimeout,
+        detail:
+            '经 Shadowsocks 访问 ${targetUri.host} 超过 ${timeout.inSeconds} 秒未完成，'
+            '可能是节点不可达或密码/加密方式不匹配。',
+        targetUrl: targetUri.toString(),
+        testedAt: DateTime.now(),
+        latency: stopwatch.elapsed,
+      );
+    } on TlsException catch (error) {
+      stopwatch.stop();
+      return ProxyTestResult(
+        success: false,
+        summary: S.current.proxy_testTlsFailed,
+        detail:
+            'Shadowsocks 隧道已建立，但到 ${targetUri.host} 的 TLS 握手失败：$error。'
+            '通常是节点无法直连目标站点或链路被干扰。',
+        targetUrl: targetUri.toString(),
+        testedAt: DateTime.now(),
+        latency: stopwatch.elapsed,
+      );
+    } on SocketException catch (error) {
+      stopwatch.stop();
+      return ProxyTestResult(
+        success: false,
+        summary: S.current.proxy_cannotConnect,
+        detail:
+            '经 Shadowsocks 访问 ${targetUri.host} 时连接被重置/中断：${error.message}。'
+            '请确认节点可用、密码与加密方式正确。',
         targetUrl: targetUri.toString(),
         testedAt: DateTime.now(),
         latency: stopwatch.elapsed,
@@ -494,12 +660,7 @@ class ProxySettingsService {
       final password = settings.password?.trim() ?? '';
       final needsAuth = username.isNotEmpty || password.isNotEmpty;
 
-      socket.add([
-        0x05,
-        needsAuth ? 0x02 : 0x01,
-        0x00,
-        if (needsAuth) 0x02,
-      ]);
+      socket.add([0x05, needsAuth ? 0x02 : 0x01, 0x00, if (needsAuth) 0x02]);
       await socket.flush();
 
       final greet = await reader.readExact(2, timeout);
@@ -528,7 +689,9 @@ class ProxySettingsService {
           throw HttpException(S.current.proxy_socks5AuthFailed);
         }
       } else if (greet[1] != 0x00) {
-        throw HttpException('${S.current.proxy_socks5AuthRejected}: 0x${greet[1].toRadixString(16)}');
+        throw HttpException(
+          '${S.current.proxy_socks5AuthRejected}: 0x${greet[1].toRadixString(16)}',
+        );
       }
 
       final hostBytes = utf8.encode(host);
@@ -567,7 +730,9 @@ class ProxySettingsService {
         final hostLength = (await reader.readExact(1, timeout))[0];
         remainLength = hostLength + 2;
       } else {
-        throw HttpException('${S.current.proxy_socks5AddrTypeNotSupported}: 0x${atyp.toRadixString(16)}');
+        throw HttpException(
+          '${S.current.proxy_socks5AddrTypeNotSupported}: 0x${atyp.toRadixString(16)}',
+        );
       }
       await reader.readExact(remainLength, timeout);
     } finally {
@@ -740,7 +905,10 @@ class _SocketByteReader {
     await _subscription.cancel();
   }
 
-  Future<Uint8List> _readUntilSequence(List<int> delimiter, Duration timeout) async {
+  Future<Uint8List> _readUntilSequence(
+    List<int> delimiter,
+    Duration timeout,
+  ) async {
     final deadline = DateTime.now().add(timeout);
     while (true) {
       final index = _indexOf(delimiter);
