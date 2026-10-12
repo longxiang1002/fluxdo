@@ -10,6 +10,7 @@ import 'package:flutter/widgets.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../services/app_logger.dart';
 import '../widgets/common/perf_overlay.dart';
 import 'frame_scheduler_probe.dart';
 import 'jank_profiler.dart';
@@ -243,8 +244,15 @@ class FrameJankMonitor {
     }).catchError((_) {}));
     // 掉帧现场抓取(debug/profile;release 内部自动跳过)
     unawaited(JankProfiler.ensureInitialized());
-    // 悬浮监控面板:开关持久化在 prefs,跟随监控启动恢复
-    unawaited(PerfOverlay.restoreIfEnabled());
+    // 悬浮监控面板:开关持久化在 prefs,但只有**开发者模式**才自动恢复。
+    // 面板胶囊每秒重建(刷新掉帧率)、展开态还有 1Hz CPU 采样,是纯诊断开销;
+    // 它常驻在 Overlay 里,即使用户早就忘了自己开过也会一直烧电 ——
+    // 与「降低 DoH 模式发热」目标直接冲突。普通用户没有开发者模式,
+    // 因此这里不恢复;开发者模式下行为不变(仍自动恢复)。
+    // 显式想用时:开发者模式 + 设置 → 关于 → 性能诊断 → 悬浮面板,仍可开。
+    if (AppLogger.developerMode) {
+      unawaited(PerfOverlay.restoreIfEnabled());
+    }
     debugPrint(
       '[JANK] monitor started, budget ${(_budgetUs() / 1000).toStringAsFixed(1)}ms'
       '@${displayRefreshRate()?.toStringAsFixed(0) ?? '?'}Hz',

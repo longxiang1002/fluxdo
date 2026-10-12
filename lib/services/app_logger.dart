@@ -18,6 +18,13 @@ class AppLogger {
     _enabled = enabled;
   }
 
+  /// 开发者模式是否开启（由 `setVerbose` 跟随 prefs 注入）。
+  ///
+  /// 其它服务用它区分「开发者自用的诊断开销」与「普通用户路径」：
+  /// 例如 FrameJankMonitor 的常驻悬浮面板只对开发者自动恢复，普通用户
+  /// 不该为一份看不见的诊断数据付发热代价。
+  static bool get developerMode => LogWriter.verboseEnabled;
+
   /// 设置详细日志（debug 级落盘），跟随开发者模式
   static void setVerbose(bool verbose) {
     LogWriter.verboseEnabled = verbose;

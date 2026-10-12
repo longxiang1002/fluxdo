@@ -35,6 +35,18 @@ class PerfOverlay {
     } catch (_) {}
   }
 
+  /// 常驻胶囊是否显示(调试用;默认关)。
+  ///
+  /// 胶囊态每秒重建一次(为了刷新掉帧率),而且它是**常驻 Overlay**:只要
+  /// [show] 过一次就会一直留在合成树里,用户切到别的页面后仍在烧电,自己
+  /// 却看不到它「当前排第几」。低端 iOS 设备上这会实打实地贡献发热,与性能
+  /// 诊断的收益完全不成比例 —— 所以默认 **不显示胶囊**。
+  ///
+  /// 注意:本开关只影响**面板是否插入 Overlay**,不影响 [FrameJankMonitor]
+  /// 的启停 —— 采集照样进行,诊断页里照旧能看到实时掉帧记录。需要看数字时
+  /// 把这里改成 `true` 重新打包即可。
+  static const bool showPersistentPill = false;
+
   static Future<void> setEnabled(bool enabled) async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -44,6 +56,9 @@ class PerfOverlay {
   }
 
   static void show() {
+    // 默认不常驻(见 [showPersistentPill]):面板是纯诊断开销,不该在
+    // 普通用户设备上一直挂着烧电。
+    if (!showPersistentPill) return;
     _wantShow = true;
     if (_entry != null) return;
     final overlay = navigatorKey.currentState?.overlay;

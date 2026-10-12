@@ -90,7 +90,7 @@ jobs:
           # pubspec 保持 0.2.28，这里在打包前改写 Runner.app 内 Info.plist 的
           # CFBundleShortVersionString。CFBundleVersion（内部版本号）保持
           # 递增（--build-number 由当前时间生成），TrollStore 覆盖安装不受影响。
-          APP_VERSION_SUFFIX="${APP_VERSION_SUFFIX:-002}"
+          APP_VERSION_SUFFIX="${APP_VERSION_SUFFIX:-003}"
           APP_PLIST="$RUNNER_TEMP/ios14-package/Payload/Runner.app/Info.plist"
           BASE_VER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PLIST")
           NEW_VER="${BASE_VER}.${APP_VERSION_SUFFIX}"
