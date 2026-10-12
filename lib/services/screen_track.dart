@@ -289,7 +289,7 @@ class ScreenTrack {
         topicTime: next.topicTime,
         timings: next.timings,
         logContext: {
-          if (debugSourceId != null) 'screenTrackSourceId': debugSourceId,
+          'screenTrackSourceId': ?debugSourceId,
           'visiblePostCount': _onscreen.length,
           'readOnscreenCount': _readOnscreen.length,
         },

@@ -130,8 +130,8 @@ class SystemProxyProbe {
       for (final e in entries)
         {
           'type': e.type,
-          if (e.host != null) 'host': e.host,
-          if (e.port != null) 'port': e.port,
+          'host': ?e.host,
+          'port': ?e.port,
           if (e.hasPacScript) 'hasPacScript': true,
           if (e.pacIsRemote) 'pacIsRemote': true,
           if (e.consistentWithSystem != null)
