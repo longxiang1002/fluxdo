@@ -101,3 +101,44 @@ _refreshTimer = Timer.periodic(_refreshInterval, (_) => refresh());
 - `3194ad67` → run 33 ✅ success（app 版本 0.2.28.001，出包链路已通）
 - `14022f07` 本地 Rust 网关代理 Shadowsocks（path 前置）
 - `d8cd0517` iOS<17 guard 结案：无进程内解
+
+---
+
+## 2026-10-13 05:55 CST — CI 连续两次静默失败修复 + SS 接管诊断（P0）
+
+### CI 连环雷（run 35 → 36）
+- **run #35** `b66b391f`：step7 `dart format` 未预检 → 挂，无包无 Release。
+- **修复** `d44e30af`：Dart 3.12.0 真实 reflow（37 文件 0 changed）→ 触发 run #36。
+- **run #36 又挂**，但**根因换了**：format 已通过（`37 files (0 changed)` ✅），
+  卡在同一个 step 的下一步 `dart analyze --fatal-infos`：
+  ```
+  info - app_logger.dart:82:7  - use_null_aware_elements
+  info - app_logger.dart:108:7 - use_null_aware_elements
+  2 issues found → exit 1
+  ```
+  即 `b66b391f` 埋的第二颗雷：collection 字面量里的 `if (x != null) k: x`
+  在新 lint 下是 **info 级**，但 CI `--fatal-infos` 让 info 也致命。
+  第 7 个文件挂掉，**后 31 个文件未分析**（同类雷未知）。
+- **全量排查修复** `c543ea15`：在改动文件集内精确扫出全部同款模式，共修 5 处 / 3 文件：
+  | 文件:行 | 改法 |
+  |---|---|
+  | `app_logger.dart:82,108` | `'tag': ?tag` |
+  | `system_proxy_service.dart:133` | `'host': ?e.host` |
+  | `system_proxy_service.dart:134` | `'port': ?e.port` |
+  | `screen_track.dart:292` | `'screenTrackSourceId': ?debugSourceId` |
+  语义等价（null 时同样省略该键）。全量 format 复查 37 文件 0 changed。
+- **run #37**（`c543ea15`，id `38313693826`）已触发，监工中。
+
+### SS 接管内置浏览器 — P0 诊断（`f3d5b068`）
+已查清全链路**已贯通**，只断在最后一米（详见 cron 提示词「新增并行方向」段）。
+本轮落地 **P0 可观测化**：`ios14_network_diagnostics_page.dart` 新增
+- 应用内代理配置展示（协议/主机/端口 + 是否启用）
+- 配置有效性 + SS 加密算法名（**绝不显示密钥**）
+- **网关实际采用的最终上游**（经 `GatewayUpstream.resolve`：应用内代理 > 系统代理 > 直连）
+- 显式标注「已启用但配置无效 → 网关仍按直连」
+- 显式标注「WebView 未接管时，上游代理对内置浏览器同样无效」
+CI 确认该文件 `No issues found!`。报告字段同步扩展 `upstreamConfigured/Protocol/Host/Port/IsValid/Resolved*/Cipher`。
+
+### 本轮结论
+两条根因都不是逻辑错，是**工具链纪律**：改完不跑 CI 同款预检（format + analyze --fatal-infos）。
+已写入 cron 提示词强制第 0 步 + 第 3 步。
