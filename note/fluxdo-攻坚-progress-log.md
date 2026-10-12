@@ -3,6 +3,58 @@
 > 格式：`北京时间 | 本轮改动 | commit | CI 状态 | 下一步`
 > 时间一律北京时间（UTC+8）。
 
+## 2026-10-13 05:30 CST | DoH 发热路径 C：干掉常驻悬浮性能面板（每秒重建 + 1Hz CPU 采样）
+
+**结论（先证据后改动）**：上一轮（05:00）修掉 `SystemProxyService` 的 10s 常驻轮询后，
+继续按路径 C（"把不必要的常驻采样改为仅诊断页开启时"）排查，发现还有一个**与 DoH
+无关、纯粹白烧电**的常驻物：`PerfOverlay` 悬浮性能面板。
+
+证据链：
+- `lib/main.dart:289`：release 下只要 prefs `pref_perf_diagnostics` 为真就
+  `FrameJankMonitor.start()`；`FrameJankMonitor.start()`（`frame_jank_monitor.dart:247`）
+  末尾无条件 `unawaited(PerfOverlay.restoreIfEnabled())` → 再读 `pref_perf_overlay`，
+  为真就 `show()` 把面板插进**根 Overlay**。
+- 面板一旦插入就**永不自行移除**（只有面板上的"隐藏"按钮会 `hide()`）；
+  胶囊态每 `Duration(seconds: 1)` 重建一次刷新掉帧率；
+  展开态还有 1Hz 的 `sampleThreadCpu()`。
+- 后果：用户开过一次诊断就永久背着这个每秒重建的 Overlay，切到任何页面都在合成
+  → 低端 iOS 上是实打实的发热源；而且和上一轮「后台零唤醒」的省电方向直接抵消。
+- 关键点：**它和 DoH 一点关系都没有**，DoH 开关只影响网络，不会关掉它。
+
+**本轮改动**（commit `b66b391f`，4 文件 +33/-3）：
+- `lib/widgets/common/perf_overlay.dart`：新增 `static const bool showPersistentPill = false`；
+  `show()` 首行 `if (!showPersistentPill) return;` → 面板**永不**插入 Overlay。
+- `lib/utils/frame_jank_monitor.dart`：`restoreIfEnabled()` 调用加
+  `if (AppLogger.developerMode)` 门禁 → 只有开发者模式才自动恢复面板，
+  开发者行为不变，普通用户不再为一份看不见的诊断数据付发热代价。
+- `lib/services/app_logger.dart`：新增 `static bool get developerMode => LogWriter.verboseEnabled`
+  （`setVerbose` 已跟随 `prefs['developer_mode']` 注入，`main.dart:358`）。
+- **采集逻辑完全不动**：`FrameJankMonitor` 照样跑，诊断页仍能看到实时掉帧记录；
+  只是不再往 Overlay 里插常驻 UI。要看数字时把 `showPersistentPill` 改 `true` 重打包。
+- **硬性禁令遵守**：只动 Flutter Overlay 与一个 `if` 门禁，**不触碰 WebView、
+  不引 `pauseTimers/resumeTimers`、不引任何滚动挂起逻辑** → 不阻塞任何 JS 执行，
+  与白屏回归路线无关。
+- 版本：`APP_VERSION_SUFFIX` `002 → 003`（上传 0.2.28.003）。
+
+**本轮 CI**：`b66b391f` → run **35**（05:28 CST 触发，in_progress）。
+前序 run **34**(`66264d5d`) = ✅ **success**，GitHub Release tag `ios14-test-34` 已生成：
+- IPA：`fluxdo-ios14-test-34-66264d5d.ipa`（54,860,621 B，0.2.28.002）
+  `https://github.com/longxiang1002/fluxdo/releases/download/ios14-test-34/fluxdo-ios14-test-34-66264d5d.ipa`
+- SHA256：`3f0c8318d518024f0535b0788b03cdf7efac35e14c1aa7bfec6efb81028c0371`
+
+**本地验证**：`dart format --set-exit-if-changed` 通过（改动文件 0 changed）✅；
+`dart analyze` 本机分析器对 **HEAD 版本也崩**（`Bad state: The analysis server crashed
+unexpectedly`，内存不足），非本轮改动引入——以上线 CI（Flutter 3.44 / Dart 3.12，512MB+
+可用）的「格式与静态分析」为准确认。
+
+**下一步**：
+1. 核对 run 35 出包，记录 `ios14-test-35` Release 与 IPA 直链。
+2. 继续路径 A/C：`cf_clearance_refresh_service` 的 `_healthTimer`(1min) 已做
+   stale 门禁（idle < 8min 直接 return），但 `_cookiePollTimer`(2min) 仍无门禁 →
+   评估是否加同样的 idle 早退；另查 DoH 生效时是否仍需常驻 Turnstile WebView。
+3. 复核 `presence_service._heartbeatTimer`(30s，仅 `_activeChannels` 非空时发包) 是否
+   有与之匹配的前后台门禁。
+
 ## 2026-10-13 05:00 CST | DoH 发热路径 A：干掉 SystemProxyService 僵尸 10s 常驻轮询
 
 **结论（先证据后改动）**：DoH 模式下的一个持续发热源是

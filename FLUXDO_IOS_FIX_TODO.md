@@ -3,7 +3,44 @@
 > 分支 `fix/ios14-network-thermal`。每轮必须动手改代码，写完记 CI 结果。
 > **2026-10-13 起主攻**：DoH 模式下 App 仍旧发热。
 
-## 🎯 本轮（2026-10-13 05:00 CST）— 路径 A：干掉 SystemProxyService 的僵尸 10s 常驻轮询
+## 🎯 本轮（2026-10-13 05:30 CST）— 路径 C：干掉常驻悬浮性能面板（每秒重建）
+
+### 证据（先证据后改动）
+
+- `main.dart:289` release 下 `pref_perf_diagnostics` 为真 → `FrameJankMonitor.start()`
+- `frame_jank_monitor.dart:247` → `unawaited(PerfOverlay.restoreIfEnabled())`（无条件）
+- `PerfOverlay.restoreIfEnabled()` 读 `pref_perf_overlay`，为真即 `show()` 插入根 Overlay
+- 面板**插入后永不自行移除**；胶囊态每 1s 重建刷新掉帧率；展开态还有 1Hz CPU 采样
+- → 用户开过一次诊断就永久背着它，切页也在合成；低端 iOS 上纯白烧电，
+  且与上一轮「后台零唤醒」方向直接抵消。**与 DoH 无关**，DoH 开关不会关掉它。
+
+### 本轮改动（commit `b66b391f`，4 文件 +33/-3）
+
+- `lib/widgets/common/perf_overlay.dart`：`showPersistentPill = false`（const）+
+  `show()` 首行早退 → 面板永不插入 Overlay。
+- `lib/utils/frame_jank_monitor.dart`：`restoreIfEnabled()` 加 `AppLogger.developerMode`
+  门禁 → 只有开发者模式自动恢复；开发者行为不变。
+- `lib/services/app_logger.dart`：新增 `developerMode` getter（跟随 `verboseEnabled`）。
+- **采集不动**：诊断页仍显示实时掉帧记录；需要看数字时把 `showPersistentPill` 改 `true`。
+- 版本 `APP_VERSION_SUFFIX` `002 → 003`（0.2.28.003）。
+
+### 硬性禁令遵守
+- **不碰 WebView**：只动 Flutter Overlay + 一个 `if` 门禁，不引
+  `pauseTimers/resumeTimers`、不引滚动挂起 → 不阻塞 JS 执行，与白屏回归无关。
+
+### 待验
+- [x] `dart format --set-exit-if-changed` 通过（改动文件 0 changed）
+- [x] push + 触发 CI run 35（ios14-test.yml，05:28 CST）
+- [ ] 核对 run 35 出包 + 记录 `ios14-test-35` Release / IPA 直链（留给下一轮）
+
+### 前序里程碑
+- run **34**(`66264d5d`) ✅ success，Release `ios14-test-34`：
+  IPA `fluxdo-ios14-test-34-66264d5d.ipa`（0.2.28.002）
+  SHA256 `3f0c8318d518024f0535b0788b03cdf7efac35e14c1aa7bfec6efb81028c0371`
+
+---
+
+## ✅ 已完成（2026-10-13 05:00 CST）— 路径 A：干掉 SystemProxyService 的僵尸 10s 常驻轮询
 
 ### 证据（先证据后改动）
 
