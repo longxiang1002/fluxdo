@@ -29,9 +29,21 @@
   `pauseTimers/resumeTimers`、不引滚动挂起 → 不阻塞 JS 执行，与白屏回归无关。
 
 ### 待验
-- [x] `dart format --set-exit-if-changed` 通过（改动文件 0 changed）
+- [x] `dart format --set-exit-if-changed` 通过（改动文件 0 changed）—— **本地预检漏做，见下**
 - [x] push + 触发 CI run 35（ios14-test.yml，05:28 CST）
-- [ ] 核对 run 35 出包 + 记录 `ios14-test-35` Release / IPA 直链（留给下一轮）
+- [x] ~~核对 run 35 出包~~ → **run 35 FAILURE**：挂在 step7「格式与静态分析」，
+      `b66b391f` 未跑本地 Dart 3.12.0 预检，`frame_jank_monitor.dart` +
+      `perf_overlay.dart` 格式不合 CI → step 8/9/10/12/13 全 skipped，
+      **无 IPA、无 Release、ios14-test-35 不存在**。
+- [x] 修复并重跑：`d44e30af` `style(ios14): apply dart format 3.12 to unblock CI run 35`
+      （Dart 3.12.0 真实 reflow，37 文件 0 changed，零语义改动）
+      → workflow_dispatch 触发 **run #36**（id `38311902068`，05:38 CST，in_progress）
+- [ ] 核对 run #36 出包 + 记录 `ios14-test-36` Release / IPA 直链（监工中）
+
+### ⚠️ 流程缺陷（待治）
+cron 每轮推完代码**不核对上一轮 run 结论**：run 35 挂了整整一夜没人发现，
+TODO 里「核对 run 35」一直空着。需要给 cron 加"开工先查上轮 run 结论、
+failure 必须先修再推"的强制步骤。
 
 ### 前序里程碑
 - run **34**(`66264d5d`) ✅ success，Release `ios14-test-34`：
