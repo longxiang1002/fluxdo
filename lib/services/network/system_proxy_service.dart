@@ -178,7 +178,16 @@ class SystemProxyService {
 
   static final instance = SystemProxyService._();
 
-  static const _refreshInterval = Duration(seconds: 10);
+  /// 周期节拍。**不是**「系统代理每 10s 会变」——系统代理是低频事件,
+  /// 真正会变的时机都由显式 [refresh] 兜住(cf_challenge_interceptor 在
+  /// CF 挑战路径主动刷新、前台 resume 时 [resume] 刷新)。这里的节拍只是
+  /// 「进程内没有别的信号时也偶尔看一眼」的兜底,故放宽到 30s:
+  /// 每次 tick 在 iOS 上是一趟**平台通道 IPC + 阻塞式
+  /// `CFNetworkCopySystemProxySettings()` 系统调用**(见
+  /// `SystemProxyReader.effectiveProxyUrl`),频率越低越省电,而正确性由
+  /// 显式刷新点保证。仍保留周期(而非纯事件驱动)是因为「用户在系统设置里
+  /// 改了代理」这类改动手机会没有进程内事件,30s 内必被兜到。
+  static const _refreshInterval = Duration(seconds: 30);
 
   static const _iosChannel = MethodChannel('com.fluxdo/system_proxy');
 
@@ -189,6 +198,11 @@ class SystemProxyService {
   SystemProxyConfig _lastConfig = const SystemProxyConfig();
   Timer? _refreshTimer;
   bool _started = false;
+
+  /// 后台时置位:暂停周期节拍。iOS 上后台本就会被系统挂起 Dart isolate,
+  /// 但 hidden/inactive 到真正挂起之间仍有一段前台态,且节点唤醒会白耗电
+  /// (一趟平台 IPC + CFNetwork 系统调用)。[pause]/[resume] 把这段窗口关掉。
+  bool _paused = false;
 
   /// 当前系统代理地址(已启用的固定代理),未启用时为 null。
   ///
@@ -232,11 +246,38 @@ class SystemProxyService {
   void start() => _ensureStarted();
 
   void _ensureStarted() {
-    if (_started) return;
     if (!(Platform.isWindows || Platform.isIOS)) return;
+    // 首次调用补齐一次真实值;定时器只在**未暂停**时挂载。
+    // 这里不能用 `_started` 做早退:暂停后 `_started` 若留在 true,
+    // resume 时就再也挂不上定时器了。用 `_refreshTimer != null` 判重。
+    if (!_paused && _refreshTimer == null) {
+      _refreshTimer = Timer.periodic(_refreshInterval, (_) => refresh());
+    }
+    if (_started) return;
     _started = true;
-    _refreshTimer = Timer.periodic(_refreshInterval, (_) => refresh());
     refresh();
+  }
+
+  /// 进入后台:停掉周期节拍,避免后台窗口内白跑平台 IPC / CFNetwork 系统调用。
+  ///
+  /// 只影响**本服务的轮询节拍**,不触碰 WebView、不碰任何 JS 执行,
+  /// 与历史「滚动挂起 → iOS 验证页白屏」的那条路线完全无关。
+  /// [effectiveProxyUrl] 的读取不受影响:后台期间若有代码显式读取,
+  /// `_ensureStarted()` 只会在首次补齐一次,不会复活定时器。
+  void pause() {
+    _paused = true;
+    _refreshTimer?.cancel();
+    _refreshTimer = null;
+    _started = false;
+  }
+
+  /// 回到前台:立即刷新一次(补齐后台期间可能发生的变化),再重挂周期节拍。
+  ///
+  /// 立即刷新保证「后台改了系统代理 → 回前台立刻用上」,不牺牲正确性。
+  void resume() {
+    if (!(Platform.isWindows || Platform.isIOS)) return;
+    _paused = false;
+    _ensureStarted();
   }
 
   /// 立即重读系统代理。Windows 读注册表;iOS 走原生 CFNetwork 读取。
@@ -314,6 +355,7 @@ class SystemProxyService {
     _refreshTimer?.cancel();
     _refreshTimer = null;
     _started = false;
+    _paused = false;
     _effectiveProxyUrl = null;
     _lastConfig = const SystemProxyConfig();
   }

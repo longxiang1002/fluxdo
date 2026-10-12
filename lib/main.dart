@@ -1280,12 +1280,18 @@ class _MainPageState extends ConsumerState<MainPage>
       _resumeDebounceTimer = null;
       _enterBackground();
       BrowserTrustCoordinator.instance.pauseForBackground();
+      // 停掉系统代理的周期读取：iOS 上每次 tick 是一趟平台通道 IPC +
+      // 阻塞式 CFNetworkCopySystemProxySettings() 系统调用，后台窗口内
+      // 没有意义（DoH 出口不随后台读变化）。回前台 [resume] 会立即补一次。
+      SystemProxyService.instance.pause();
     } else if (state == AppLifecycleState.resumed) {
       // 延迟执行，避免系统配置变更（主题切换等）触发的假 resume
       _resumeDebounceTimer?.cancel();
       _resumeDebounceTimer = Timer(const Duration(milliseconds: 500), () {
         if (!mounted) return;
         _resumeDebounceTimer = null;
+        // 先恢复系统代理读取（立即刷新一次），再做其余恢复动作。
+        SystemProxyService.instance.resume();
         unawaited(_resumeFromBackground());
       });
     }
