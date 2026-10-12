@@ -8,6 +8,8 @@ import '../services/network/adapters/apple_transport_policy.dart';
 import '../services/network/adapters/platform_adapter.dart';
 import '../services/network/doh/doh_route_diagnostics.dart';
 import '../services/network/doh/network_settings_service.dart';
+import '../services/network/proxy/gateway_upstream.dart';
+import '../services/network/proxy/proxy_settings_service.dart';
 
 /// 把 [NetworkSettingsService.webViewProxyState] 的机器值翻成一句人话。
 ///
@@ -35,6 +37,7 @@ class _Ios14NetworkDiagnosticsPageState
     extends State<Ios14NetworkDiagnosticsPage> {
   final _settings = NetworkSettingsService.instance;
   final _routes = DohRouteDiagnostics.instance;
+  final _proxyService = ProxySettingsService.instance;
   bool _testing = false;
   String _dnsResult = '尚未测试';
   int? _testedVersion;
@@ -92,6 +95,21 @@ class _Ios14NetworkDiagnosticsPageState
     }
   }
 
+  /// 本地网关实际会使用的上游（应用内代理 > 系统代理 > 直连）。
+  ///
+  /// 与 `gateway_upstream.dart::GatewayUpstream.resolve` 同一优先级口径，
+  /// 用于回答「配置好的 SS 到底有没有被网关接走」这个此前完全不可见的问题。
+  GatewayUpstream? get _resolvedUpstream => GatewayUpstream.resolve(
+    applicationProxy: _proxyService.current,
+    systemProxyUrl: null,
+  );
+
+  /// SS 加密算法名，仅用于确认「是 SS 而非 SOCKS5/HTTP」；不含任何密钥材料。
+  String? get _upstreamCipher {
+    final s = _proxyService.current;
+    return s.isShadowsocks && s.cipher.isNotEmpty ? s.cipher : null;
+  }
+
   Map<String, Object?> _report() => {
     'schema': 1,
     'iosMajor': Platform.isIOS
@@ -119,6 +137,17 @@ class _Ios14NetworkDiagnosticsPageState
     // 内部浏览器与 DoH 是否已确证同一出口（null = 未采样，不冒充成功）。
     'dohEgressVerified': _routes.dohEgressVerified,
     'dohRouteExact': _routes.dohRouteExact,
+    // ── 上游代理（含 Shadowsocks）是否进入本地网关 ──
+    // 只暴露协议/主机/端口与「是否有效」，绝不落盘或展示口令/密钥。
+    'upstreamConfigured': _proxyService.current.enabled,
+    'upstreamProtocol': _proxyService.current.protocol.storageValue,
+    'upstreamHost': _proxyService.current.host,
+    'upstreamPort': _proxyService.current.port,
+    'upstreamIsValid': _proxyService.current.isValid,
+    'upstreamResolvedProtocol': _resolvedUpstream?.protocol,
+    'upstreamResolvedHost': _resolvedUpstream?.host,
+    'upstreamResolvedPort': _resolvedUpstream?.port,
+    'upstreamCipher': _upstreamCipher,
     'iosIoFallback': usesIosIoTransport,
     'dnsTestVersion': _testedVersion,
     'dnsTestResult': _dnsResult,
@@ -163,6 +192,35 @@ class _Ios14NetworkDiagnosticsPageState
               null => "尚未采样",
             }}',
           ),
+          const Divider(height: 24),
+          Text(
+            '上游代理（含 Shadowsocks）',
+            style: Theme.of(context).textTheme.titleSmall,
+          ),
+          Text(
+            '应用内代理配置：'
+            '${_proxyService.current.enabled ? "已启用" : "未启用"}'
+            '${_proxyService.current.hasServer ? "（${_proxyService.current.protocol.storageValue}://${_proxyService.current.host}:${_proxyService.current.port}）" : "（未填写服务器）"}',
+          ),
+          Text(
+            '配置是否有效：${_proxyService.current.isValid ? "有效" : "无效或不完整"}'
+            '${_upstreamCipher != null ? "，加密：$_upstreamCipher" : ""}',
+          ),
+          Text(
+            '网关实际采用的最终上游：'
+            '${_resolvedUpstream == null ? "直连（未使用任何上游代理）" : "${_resolvedUpstream!.protocol}://${_resolvedUpstream!.host}:${_resolvedUpstream!.port}"}',
+          ),
+          if (_resolvedUpstream == null && _proxyService.current.enabled)
+            const Text('注意：已启用应用内代理，但配置无效（服务器/端口缺失或 SS 密钥不合法），网关仍按直连处理。'),
+          if (_resolvedUpstream != null)
+            Text(
+              '内置浏览器接管：'
+              '${_settings.webViewProxyApplied ? "已把 WebView 指向本地网关，上游为上述代理" : "未接管（WebView 流量未进入本地网关，上游代理对其无效）"}',
+            ),
+          const Text(
+            '说明：上游代理作用于「本地网关的上游出口」。若内置浏览器未被接管，WebView 流量不经过网关，此处的 SS 配置对它同样无效。',
+          ),
+          const Divider(height: 24),
           if (webViewUnsupported)
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 12),
