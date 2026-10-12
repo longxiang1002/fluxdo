@@ -3,6 +3,45 @@
 > 格式：`北京时间 | 本轮改动 | commit | CI 状态 | 下一步`
 > 时间一律北京时间（UTC+8）。
 
+## 2026-10-13 05:00 CST | DoH 发热路径 A：干掉 SystemProxyService 僵尸 10s 常驻轮询
+
+**结论（先证据后改动）**：DoH 模式下的一个持续发热源是
+`SystemProxyService` 的周期读取——iOS 上每次 tick 是一趟**平台通道 IPC +
+阻塞式 `CFNetworkCopySystemProxySettings()` 系统调用**，此前 **10s 一次、
+永久运行、无前后台门禁**。系统代理是低频事件，这个 0.1Hz 常驻唤醒是纯浪费。
+
+证据链：
+- `lib/services/network/system_proxy_service.dart:238`（旧）`Timer.periodic(10s)`
+- `main.dart:392` iOS 无条件 `start()`
+- `refresh()` → `_refreshIos()` → `invokeMethod('effectiveProxyUrl')`
+- `ios/Runner/AppDelegate.swift:39` → `SystemProxyReader.effectiveProxyUrl`
+  → `CFNetworkCopySystemProxySettings()`（阻塞式系统调用）
+
+**本轮改动**（commit `e2bb57ba`）：
+- `pause()`/`resume()`：后台停拍（避免后台窗口白耗电）；回前台**立即刷新一次**
+  再重挂拍，正确性不降级。
+- `_ensureStarted()` 改用 `_refreshTimer != null` 判重，保证 `resume` 能重挂拍。
+- 周期 `10s → 30s`：变化时机已由 `cf_challenge_interceptor` 显式 `refresh()`
+  与前台 `resume()` 兜住，周期只作「系统设置里手改代理」这类无进程内事件时的兜底。
+- `lib/main.dart` `didChangeAppLifecycleState`：`hidden` → `pause()`，
+  `resumed` → `resume()`。
+- 新增 `test/services/network/system_proxy_service_lifecycle_test.dart`（3 passed）。
+- **硬性禁令遵守**：只动轮询节拍，不触碰 WebView/JS 执行，不引
+  `pauseTimers/resumeTimers`，与历史滚动挂起白屏路线无关。
+
+**CI**：`e2bb57ba`+`66264d5d` → run **34**（05:53 CST 触发，pending）。
+**版本**：APP_VERSION_SUFFIX `001 → 002`（上传 0.2.28.002）。
+
+**本地验证**：`dart format` 0 changed ✅；`dart analyze` 改动文件 No issues ✅；
+新测试 3 passed ✅。
+
+**下一步**：
+1. 核对 run 34 出包（约 20~40min）。
+2. 继续排查 DoH 模式发热：`cf_clearance_refresh_service` 的 `_healthTimer`(1min)
+   / `_cookiePollTimer`(2min) 是否在 DoH 生效时仍高频空转；`probeEffectiveProxy`
+   是否在每次导航都触发（当前 `webview_page.dart:93`）→ 改为仅诊断页/低频采样。
+3. 确认本轮节拍改动不会让「系统代理中途变化」漏检超过 30s。
+
 ## 2026-10-09 06:00 CST | 路径 A/B 根因定论 + WebView 接管失败诊断化
 
 **本轮改动**（commit 见下）：
