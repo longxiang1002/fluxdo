@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import '../services/network/adapters/apple_transport_policy.dart';
 import '../services/network/adapters/platform_adapter.dart';
+import '../services/network/adapters/webview_bridge_diagnostics.dart';
 import '../services/network/doh/doh_route_diagnostics.dart';
 import '../services/network/doh/network_settings_service.dart';
 import '../services/network/proxy/gateway_upstream.dart';
@@ -38,6 +39,7 @@ class _Ios14NetworkDiagnosticsPageState
   final _settings = NetworkSettingsService.instance;
   final _routes = DohRouteDiagnostics.instance;
   final _proxyService = ProxySettingsService.instance;
+  final _bridge = WebViewBridgeDiagnostics.instance;
   bool _testing = false;
   String _dnsResult = '尚未测试';
   int? _testedVersion;
@@ -148,11 +150,37 @@ class _Ios14NetworkDiagnosticsPageState
     'upstreamResolvedHost': _resolvedUpstream?.host,
     'upstreamResolvedPort': _resolvedUpstream?.port,
     'upstreamCipher': _upstreamCipher,
+    // ── 网络桥开销画像（D1）──
+    // 只暴露聚合计数与字节量，不含 URL/正文，无账户内容。
+    'bridgeStats': _bridgeReport(),
     'iosIoFallback': usesIosIoTransport,
     'dnsTestVersion': _testedVersion,
     'dnsTestResult': _dnsResult,
     'routes': _routes.snapshot(),
   };
+
+  Map<String, Object?> _bridgeReport() {
+    final s = WebViewBridgeDiagnostics.instance;
+    return {
+      'totalRequests': s.totalRequests,
+      'imageSameOrigin': s.imageSameOrigin,
+      'imageOther': s.imageOther,
+      'apiGet': s.apiGet,
+      'apiWrite': s.apiWrite,
+      'other': s.other,
+      'textResponses': s.textResponses,
+      'textResponseBytes': s.textResponseBytes,
+      'streamResponses': s.streamResponses,
+      'streamResponseBytes': s.streamResponseBytes,
+      'totalResponseBytes': s.totalResponseBytes,
+      'requestBodyBase64': s.requestBodyBase64,
+      'requestBodyStreamBridge': s.requestBodyStreamBridge,
+      'requestBodyDirect': s.requestBodyDirect,
+      'avgTotalMs': s.totalRequests == 0 ? 0 : s.totalMs ~/ s.totalRequests,
+      'avgJsEvalMs': s.totalRequests == 0 ? 0 : s.jsEvalMs ~/ s.totalRequests,
+      'failed': s.failed,
+    };
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -219,6 +247,39 @@ class _Ios14NetworkDiagnosticsPageState
             ),
           const Text(
             '说明：上游代理作用于「本地网关的上游出口」。若内置浏览器未被接管，WebView 流量不经过网关，此处的 SS 配置对它同样无效。',
+          ),
+          const Divider(height: 24),
+          Text('网络桥开销画像（活跃负载）', style: Theme.of(context).textTheme.titleSmall),
+          Text(
+            '走桥请求总数：${_bridge.totalRequests}'
+            '（图片同源 ${_bridge.imageSameOrigin} / 图片其他 ${_bridge.imageOther}'
+            ' / API 读 ${_bridge.apiGet} / 写 ${_bridge.apiWrite}'
+            ' / 其他 ${_bridge.other}）',
+          ),
+          Text(
+            '响应字节：共 ${_bridge.totalResponseBytes}B'
+            '（文本 ${_bridge.textResponseBytes}B / 二进制流 ${_bridge.streamResponseBytes}B）',
+          ),
+          Text(
+            '流响应 ${_bridge.streamResponses} 次，文本响应 ${_bridge.textResponses} 次；'
+            '失败 ${_bridge.failed} 次',
+          ),
+          Text(
+            '请求体形态：direct ${_bridge.requestBodyDirect}'
+            ' / streamBridge ${_bridge.requestBodyStreamBridge}'
+            ' / base64 ${_bridge.requestBodyBase64}',
+          ),
+          Text(
+            '平均耗时 ${_bridge.totalRequests == 0 ? 0 : _bridge.totalMs ~/ _bridge.totalRequests}ms'
+            '（其中 JS 调用 ${_bridge.totalRequests == 0 ? 0 : _bridge.jsEvalMs ~/ _bridge.totalRequests}ms）',
+          ),
+          const Text(
+            '说明：统计自进程启动以来所有经 WebView 桥的请求，常驻聚合、不含 URL 与正文。'
+            '刷帖前后各看一次差值，即可判断活跃发热时图片与 API 各占多少。',
+          ),
+          OutlinedButton(
+            onPressed: () => setState(WebViewBridgeDiagnostics.instance.reset),
+            child: const Text('重置桥统计（刷帖前清零）'),
           ),
           const Divider(height: 24),
           if (webViewUnsupported)

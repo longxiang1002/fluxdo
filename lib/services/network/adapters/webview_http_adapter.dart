@@ -15,7 +15,9 @@ import '../cookie/session_cookie_sentinel.dart';
 import '../cookie/webview_cookie_priming.dart';
 import '../../webview_settings.dart';
 import '../../windows_webview_environment_service.dart';
+import '../webview/webview_adapter_settings_service.dart';
 import 'adapter_log_metadata.dart';
+import 'webview_bridge_diagnostics.dart';
 
 /// WebView HTTP 适配器
 ///
@@ -261,6 +263,10 @@ document.close();
           options.responseType == ResponseType.stream ||
           options.responseType == ResponseType.bytes;
 
+      // D1: 桥开销归因。仅整数累加，不发散存储、不写日志，激活态开销可忽略。
+      final bridgeStats = WebViewBridgeDiagnostics.instance;
+      _recordBridgeRequestKind(options, requestUri, method);
+
       if (prepareAppCookies) {
         // v0.4.0: 取代 RawSetCookieQueue.flush + _repair + _syncCookiesFromJar
         // 1. Priming: 确保 WV 中 jar 的 critical cookies 已就绪
@@ -307,6 +313,7 @@ document.close();
         requestUri: requestUri,
       );
       final bodyScript = bodyPlan.script;
+      _recordBridgeBodyShape(bridgeStats, bodyPlan.shape);
 
       if (wantsBinaryStream) {
         final response = await _fetchBinaryStreamResponse(
@@ -500,16 +507,74 @@ document.close();
         'browser=${browserWaitElapsed.inMilliseconds}ms)',
       );
 
+      // D1: 文本响应（JSON/HTML）经 JS .text() 跨桥回传的字节画像。
+      bridgeStats.textResponses++;
+      bridgeStats.textResponseBytes += bodyContent.length;
+      bridgeStats.totalMs += totalWatch.elapsedMilliseconds;
+      if (jsEvalElapsed != null) {
+        bridgeStats.jsEvalMs += jsEvalElapsed.inMilliseconds;
+      }
+
       return ResponseBody.fromString(
         bodyContent,
         statusCode,
         headers: responseHeaders,
       );
+    } catch (_) {
+      WebViewBridgeDiagnostics.instance.failed++;
+      rethrow;
     } finally {
       _activeFetches--;
       if (_activeFetches == 0 && _disposeWhenIdle) {
         close(force: false);
       }
+    }
+  }
+
+  /// D1: 把「这条走桥的请求是哪一类」记进聚合计数。
+  ///
+  /// 分类只依赖请求自身元数据（resourceKind / 同源判断 / 方法），不解析 URL 内容，
+  /// 也不触碰任何 WebView API，因此对桥上行为零影响。
+  void _recordBridgeRequestKind(
+    RequestOptions options,
+    Uri requestUri,
+    String method,
+  ) {
+    final stats = WebViewBridgeDiagnostics.instance;
+    final resourceKind = options.extra[resourceKindExtraKey]?.toString();
+    if (resourceKind == resourceKindImage) {
+      if (WebViewAdapterSettingsService.instance.canUseWebView(requestUri)) {
+        stats.imageSameOrigin++;
+      } else {
+        stats.imageOther++;
+      }
+      return;
+    }
+    if (method == 'GET' || method == 'HEAD') {
+      stats.apiGet++;
+      return;
+    }
+    if (method == 'POST' ||
+        method == 'PUT' ||
+        method == 'PATCH' ||
+        method == 'DELETE') {
+      stats.apiWrite++;
+      return;
+    }
+    stats.other++;
+  }
+
+  /// D1: 请求体在桥上的传输形态归因（base64 fallback 是 D3 的优化靶点）。
+  void _recordBridgeBodyShape(
+    WebViewBridgeDiagnostics stats,
+    _BodyShape shape,
+  ) {
+    if (shape == _BodyShape.base64) {
+      stats.requestBodyBase64++;
+    } else if (shape == _BodyShape.streamBridge) {
+      stats.requestBodyStreamBridge++;
+    } else if (shape == _BodyShape.direct) {
+      stats.requestBodyDirect++;
     }
   }
 
@@ -692,7 +757,16 @@ document.close();
     );
     _setNetworkLogField(options, 'webViewBinaryStream', true);
 
+    // D1: 二进制流经 WebMessageChannel 分块回传的字节画像（最有价值的桥负载指标）。
+    final bridgeStats = WebViewBridgeDiagnostics.instance;
+    bridgeStats.streamResponses++;
+    bridgeStats.totalMs += totalWatch.elapsedMilliseconds;
+    if (jsEvalElapsed != null) {
+      bridgeStats.jsEvalMs += jsEvalElapsed.inMilliseconds;
+    }
+
     bridge.done.whenComplete(() {
+      bridgeStats.streamResponseBytes += bridge.bytesReceived;
       _setNetworkLogField(options, 'webViewBinaryBytes', bridge.bytesReceived);
       _setNetworkLogField(
         options,
@@ -1049,7 +1123,10 @@ document.close();
 
     final directBodyScript = await _buildDirectBodyScript(options);
     if (directBodyScript != null) {
-      return _RequestBodyPlan(script: directBodyScript);
+      return _RequestBodyPlan(
+        script: directBodyScript,
+        shape: _BodyShape.direct,
+      );
     }
 
     final streamedBodyScript = await _buildStreamedBodyScript(
@@ -1058,7 +1135,10 @@ document.close();
       requestUri: requestUri,
     );
     if (streamedBodyScript != null) {
-      return _RequestBodyPlan(script: streamedBodyScript);
+      return _RequestBodyPlan(
+        script: streamedBodyScript,
+        shape: _BodyShape.streamBridge,
+      );
     }
 
     final requestBytes = await _readRequestBytes(requestStream);
@@ -1087,6 +1167,7 @@ document.close();
               : new Blob([bodyBytes]);
           }
       ''',
+        shape: _BodyShape.base64,
       );
     }
 
@@ -1096,6 +1177,7 @@ document.close();
 
     return _RequestBodyPlan(
       script: "fetchOptions.body = ${jsonEncode(options.data.toString())};",
+      shape: _BodyShape.direct,
     );
   }
 
@@ -1569,10 +1651,14 @@ document.close();
 }
 
 class _RequestBodyPlan {
-  const _RequestBodyPlan({required this.script});
+  const _RequestBodyPlan({required this.script, this.shape = _BodyShape.none});
 
   final String script;
+  final _BodyShape shape;
 }
+
+/// 请求体在桥上的传输形态，供 D1/D3 聚合归因（不影响行为）。
+enum _BodyShape { none, direct, streamBridge, base64 }
 
 enum _WebViewCookieMode { sync, readOnly, none }
 
