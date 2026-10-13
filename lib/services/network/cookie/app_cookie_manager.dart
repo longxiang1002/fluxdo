@@ -714,14 +714,16 @@ class AppCookieManager extends Interceptor {
     // 全量 sweep 是为了不漏掉新业务 cookie (如 LDC/CDK 等)。
     // 同步等所有 sweep 完成,保证 next handler 时两端一致。
     if (filteredCookies.isNotEmpty) {
-      final sweepFutures = filteredCookies.map((cookie) {
-        return SessionCookieSentinel.instance.sweep(
-          resolvedUri.toString(),
-          cookie.name,
-          intent: _intentForCookie(cookie),
-        );
-      }).toList();
-      await Future.wait(sweepFutures);
+      // 批量 sweep：sweepMany 用一次 countCookiesByNames 批量预取全部变体
+      // 计数（iOS 原生仅一次 getAllCookies 枚举），再注入各 name 的 sweep，
+      // 省掉「响应 cookie 数」次独立的全量枚举 + 跨语言往返。语义与
+      // 逐个 sweep 完全一致（含节流 / 锁 / delete 分支）。
+      await SessionCookieSentinel.instance.sweepMany(
+        resolvedUri.toString(),
+        filteredCookies
+            .map((cookie) => (cookie.name, _intentForCookie(cookie)))
+            .toList(growable: false),
+      );
     }
 
     // Optionally save cookies for redirected locations.

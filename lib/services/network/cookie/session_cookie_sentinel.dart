@@ -189,6 +189,69 @@ class SessionCookieSentinel {
     return await Future.wait(futures);
   }
 
+  /// 对一批 `(name, intent)` 做 sweep，语义与逐个调用 [sweep] 完全一致
+  /// （含 1s 节流、per-name 锁、delete 分支），唯一区别是**变体计数批量预取**：
+  ///
+  /// 逐个 [sweep] 时每个 name 都要走一次 `countCookiesByName`，iOS 原生实现
+  /// 每次都是一次 `WKHTTPCookieStore.getAllCookies` 全量枚举 + 跨语言序列化。
+  /// 活跃刷帖时每个响应都带若干 Set-Cookie（session-token / _t / LDC …），
+  /// 逐个 sweep 就是「响应 cookie 数」次全量枚举，且 `await Future.wait`
+  /// 同步阻塞在响应路径上——这是活跃负载下与请求本身无关的固定桥开销。
+  ///
+  /// 这里先用一次 [RawCookieWriter.countCookiesByNames] 拿到全部计数
+  /// （原生侧一次枚举），再注入各 name 的 sweep，省掉重复枚举。
+  /// 计数失败时返回空 map，各 sweep 回退到自己再读一次（行为等价，只是慢）。
+  ///
+  /// 注意：节流（[wasRecentlySwept]）与锁仍在 [sweep] 内部生效，本方法
+  /// **不改变**任何同步/删除语义，只减少原生往返次数。
+  Future<List<SweepResult>> sweepMany(
+    String url,
+    List<(String, SweepIntent)> targets, {
+    bool force = false,
+  }) async {
+    if (targets.isEmpty) return const [];
+
+    // 只对「需要真正读变体数」的 name 预取计数：节流窗口内的 ensureUnique
+    // 会在 sweep 入口直接 noop，不必为它付一次批量枚举里的位点（批量本身
+    // 只枚举一次，位点成本可忽略，但这里仍按需缩小 names 集合以贴近语义）。
+    final names = <String>{};
+    for (final (name, intent) in targets) {
+      if (!force &&
+          intent == SweepIntent.ensureUnique &&
+          wasRecentlySwept(name)) {
+        continue;
+      }
+      names.add(name);
+    }
+
+    Map<String, int> variantsBefore = const {};
+    if (names.isNotEmpty) {
+      try {
+        variantsBefore = await _writer.countCookiesByNames(
+          url,
+          names.toList(growable: false),
+        );
+        final stats = WebViewBridgeDiagnostics.instance;
+        stats.cookieBatchCountCalls++;
+        stats.cookieBatchCountNames += names.length;
+      } catch (e) {
+        debugPrint('[Sentinel] sweepMany batch count failed: $e');
+        variantsBefore = const {};
+      }
+    }
+
+    final futures = targets.map(
+      ((String, SweepIntent) t) => sweep(
+        url,
+        t.$1,
+        intent: t.$2,
+        force: force,
+        variantsBeforeOverride: variantsBefore[t.$1],
+      ),
+    );
+    return await Future.wait(futures);
+  }
+
   /// 触发 Nuclear Reset：清空 WV 中 url 适用域下所有 cookie + 从 jar 重灌 + 校验。
   ///
   /// 不再按 criticalCookieNames 过滤,全量处理:
