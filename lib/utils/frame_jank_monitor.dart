@@ -704,7 +704,7 @@ class FrameJankMonitor {
       '[JANK] summary: $_janks/$_frames janky, '
       'worst build ${_ms(_worstBuild)}ms, '
       'worst raster ${_ms(_worstRaster)}ms, '
-      'budget ${(budgetUs / 1000).toStringAsFixed(1)}ms'
+      'budget ${(_budgetUs() / 1000).toStringAsFixed(1)}ms'
       '@${displayRefreshRate()?.toStringAsFixed(0) ?? '?'}Hz, '
       'semantics: ${semanticsEnabled ? countSemanticsNodes() : 'off'}, '
       'platform views: ${countPlatformViews()}',
