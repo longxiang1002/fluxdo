@@ -4,7 +4,52 @@
 > **2026-10-13 起主攻**：DoH 模式下 App 仍旧发热。
 
 
-## 🎯 本轮（2026-10-13 14:00 CST）— 路径A：Presence 心跳「后台静默」，消除 30s 一次出网空转
+## 🎯 本轮（2026-10-13 20:53 CST）— 路径A：帧监控 summary 空转钳流
+
+### CI 前置核对（强制第 0 步）
+- **#46** `280547e3`(id `38387493583`) = ✅ **success**（10-13 19:02 CST 触发）。
+- GitHub Release **`ios14-test-46`** 已生成（10-13 19:36 CST 发布）：
+  `fluxdo-ios14-test-46-280547e3.ipa`(54,868,783B) + SHA256SUMS + build-info
+  + validation + inspection。
+- **版本链路复核（验证 19:00 轮的 CI bug 修复）**：
+  `build-info.txt` 含 `APP_VERSION_SUFFIX=009` ✅；
+  `ipa-inspection.json` → `version = 0.2.28.009`、`build = 2026101311` ✅。
+- **#45 / #44** 的 failure 已在 19:00 轮修复，无遗留。
+- → **无未修复 failure、无需补建 Release**，本轮可推进。
+
+### 本轮证据（先量后改）
+- `lib/utils/frame_jank_monitor.dart:659`（改前）summary 输出条件只有
+  `now - _lastSummary >= 10s && _frames > 0`，**没有"有无掉帧"前置条件**。
+- summary 体（`:661-668`）在 `semanticsEnabled` 下调 `countSemanticsNodes()`
+  （遍历整棵语义树）+ `countPlatformViews()`（遍历平台视图树）—— 注释自认是"实打实开销"。
+- 该代码在**每帧**收尾处执行；DoH + 常驻 CF WebView 下空转帧持续产生（见文件内
+  "空转探测"章节），于是整场会话每 10s 在 UI 线程付一次全量遍历的账。
+- 与诊断总开关绑定 → 用户开过一次诊断就永久背账（同 05:30 轮修掉的 `PerfOverlay` 一类）。
+
+### 本轮改动（commit `51a980e6`）
+`lib/utils/frame_jank_monitor.dart`：
+- 新增 `_windowHadJank`（出过真实 JANK 记录即置真）、`_lastSummaryFrames`（帧数水位）。
+- summary 体抽成 `_emitSummary()`，**内容逐字未改**。
+- 条件改为 `_windowHadJank ? 10s : _idleSummaryInterval(60s)` **且** `_frames > _lastSummaryFrames`
+  → 有掉帧的窗口 10s 节奏不变（诊断能力零损失）；纯空转窗口降到 60s。
+- **硬性禁令遵守**：纯 Dart 统计节流，未触碰 WebView、无 `pauseTimers`/`resumeTimers`、
+  无滚动挂起逻辑，不阻塞任何 JS 执行。
+
+### 本地验证（CI 同款工具链 Dart 3.12.0）
+- `dart format --output=none --set-exit-if-changed`：1 file **0 changed，exit 0**。
+- CI 同款 diff 命令复核：仅 `frame_jank_monitor.dart`，**0 changed，exit 0**。
+- 手工核对：`{}`×198/198 配平；新符号引用计数正确。
+- `dart analyze` 容器内崩溃（既有环境限制），靠 CI STEP8 把关。
+
+### 待验
+- [ ] CI run **#47**（`51a980e6`，`APP_VERSION_SUFFIX` `009 → 010`）
+- [ ] 核对 run #47：STEP8 格式与静态分析 + iOS14 回归 + 出包 + Release `ios14-test-47`
+- [ ] 老板实机：DoH 模式 + 打开性能诊断，对比 0.2.28.009 vs .010 的掉帧/发热
+
+## ✅ 上轮（2026-10-13 19:00 CST）— 修 CI：`${GITHUB_ENV}` 被表达式替换吞掉（STEP7 unbound variable）
+
+
+## ✅ 上轮（2026-10-13 14:00 CST）— 路径A：Presence 心跳「后台静默」，消除 30s 一次出网空转
 
 ### CI 前置核对（强制第 0 步）
 - **#41** `9da67d1c`(id `38344469187`) = ✅ **success**（10-13 12:01 CST 触发）。

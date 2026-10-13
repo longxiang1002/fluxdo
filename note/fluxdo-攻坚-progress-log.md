@@ -1034,3 +1034,197 @@ exit 0；`dart analyze` 项目级分析器在本容器崩溃（既有环境限�
    - `dns.rs:1253` `http2_keep_alive_while_idle(true)`（Rust，单独一轮便于归因）。
    - 路径B：DoH 通道连接复用（rhttp/Dio 是否每请求新建连接）。
    - SS 代理接管内置浏览器（并行方向 P0：能力诊断可观测化）。
+
+---
+
+## 2026-10-13 15:00 CST（北京时间）｜CI 修复：版本后缀被表达式替换吞掉（卡死 008 → 009）
+
+**CI 前置核对（强制第 0 步）**
+- **#43** `befa861c`(id `38356207263`) = ✅ **success**（10-13 14:21 CST 触发）。
+  Release **`ios14-test-43`** 已发布（14:57 CST）：`fluxdo-ios14-test-43-befa861c.ipa`
+  (54,868,793B) + SHA256SUMS + build-info + validation + inspection（5 附件齐）。
+- **#42** `fe78aba4` = ❌ failure（**已修复**，非新问题）：step8「格式与静态分析」
+  里 `dart analyze --fatal-infos presence_service.dart` 报
+  `unnecessary_import`（`import 'package:flutter/foundation.dart'` 冗余），
+  `befa861c` 已删除该导入并通过 → **无未修复 failure**。
+- 无需补建 Release。→ 本轮可推进。
+
+**本轮发现（核对过程中挖出的系统性缺陷）**
+- 核对 #41/#43 的 `app 显示版本` 日志行与 Release 里的 `ipa-inspection.json`：
+  | run | 声称版本 | 实际 version | 结论 |
+  |-----|---------|-------------|------|
+  | #39 | .005 | 0.2.28.005 | ✅ |
+  | #41 | .007 | 0.2.28.007 | ✅（suffix 恰为 007，未暴露）|
+  | #42 | — | 无包（step8 挂） | — |
+  | #43 | .008 | 0.2.28.008 | ✅ 但**本应为 009** |
+- 根因：`.github/workflows/ios14-test.yml` 第 113 行（改前）
+  `APP_VERSION_SUFFIX="${APP_VERSION_SUFFIX:-008}"`，与第 148 行
+  `NEWNAME="fluxdo-ios14-test-${{ github.run_number }}-${SHORT}.ipa"` **同在
+  「构建未签名 IPA」这一个 run 块内**。GitHub 对含 `${{ }}` 字面量的 run 块
+  整体做表达式替换时，会连带吞掉同一块里未被保护的花括号变量引用 →
+  `${APP_VERSION_SUFFIX:-008}` 退化成纯文本 `APP_VERSION_SUFFIX:-008`，
+  于是**静默取默认值 008**；`${SHORT}` 同样被吞成空串（由紧随其后的 `sed`
+  兜回 commit 短 hash 才没暴露）。
+- **后果**：只要不改，后续每一轮的版本后缀都会被压回 `008`，老板**无法区分
+  新旧安装**——这正是「版本号递增小版本」规则想解决却实际失效的地方。
+- 教训：靠人肉读日志核对版本号是不可靠的（我此前几轮都只看了 `dart format`
+  与 `conclusion`，没对 `ipa-inspection.json` 的 `version` 字段）。
+
+**本轮改动（commit `f98045d3`，仅 CI，2 文件）**
+- `.github/workflows/ios14-test.yml`：
+  1. `APP_VERSION_SUFFIX` 改为**纯字面量** `"009"`，彻底不依赖 `:-` 默认值语法。
+  2. 「项目准备及工具信息」步骤增写 `echo "APP_VERSION_SUFFIX=..." >> dist/build-info.txt`
+     —— 版本号从「日志里的一句话」变成**随 Release 发布的 artifact 字段**，可核对。
+  3. 在 suffix 步骤与重命名步骤加注释标记该 run 块的花括号陷阱，防回归
+     （注释里刻意不写 `${{ }}` 字面量——见下方事故）。
+- `.gitignore`：追加 `*_TODO.md`（session 本地计划文件不入库）。
+
+**⚠️ 本轮一次自伤事故（已修复，如实记录）**
+- 首次 push 的 `a0995972` **把 workflow 改坏了**：我在注释里写了
+  `${{ }}` 字面量，被 GitHub 当成表达式解析，dispatch 直接 422
+  `An expression was expected`，run #44 随之 failure（无包、无 Release）。
+- 修复方式：把注释里的 `${{ }}` 全部去掉，改用「双花括号表达式」等文字描述；
+  并用正则全量扫描文件，确认剩余的 `${{ }}` **全部是合法表达式**（21 处，
+  均为 `github.*` / `env.*` / `secrets.*`），再 `--amend` 重推 + 重新 dispatch。
+- 教训已落进代码注释：**给 GitHub Actions 写注释也不能出现 `${{ }}` 字面量**。
+
+**硬性禁令遵守**：本轮**未触碰任何 `.dart` 文件、未触碰 WebView**，
+无 `pauseTimers`/`resumeTimers`、无滚动挂起逻辑 → 与「验证页白屏」路线无关。
+
+**本地验证**
+- `python3 -c "yaml.safe_load(...)"` → YAML OK，14 个 step；正则扫描 `${{ }}` 全合法。
+- 真实校验：GitHub dispatch 返回 **HTTP 204**（YAML 通过 GitHub 自身解析器）。
+- CI 同款 `dart format --set-exit-if-changed`（Dart 3.12.0，对 base 差异的 38 个
+  .dart 文件）→ **0 changed**，exit 0。
+
+**本轮 CI**：触发 run **#45**（`f98045d3`，`APP_VERSION_SUFFIX` `008 → 009`）。
+
+**下一步**
+1. 核对 run #45：`app 显示版本: 0.2.28 -> 0.2.28.009`；Release `ios14-test-45` 的
+   `ipa-inspection.json` 里 `version == 0.2.28.009`、`build-info.txt` 含
+   `APP_VERSION_SUFFIX=009`（本轮新加的字段，第一次生效）。
+2. **回到降发热主线**（本轮只修了 CI，未动 Dart）：下一轮从候选里挑一个——
+   - `cf_challenge_service.dart` `_startChallengeRevealProbe` 250ms 轮询（收益小、
+     有 20 次上界，风险低）；
+   - `dns.rs` `http2_keep_alive_while_idle(true)`（Rust，单独一轮便于归因）；
+   - 路径B：DoH 通道连接复用（rhttp/Dio 每请求是否新建连接）。
+3. SS 代理接管内置浏览器（并行方向 P0：能力诊断可观测化）。
+
+---
+
+## 2026-10-13 19:00 CST | 核对 run45 + 修 CI：`${GITHUB_ENV}` 被表达式替换吞掉（STEP7 unbound variable）
+
+**开工核对（强制流程 0）**：最近 3 次 run = #45(failure) / #44(failure) / #43(success)。
+**必须先修 failure 才能推新代码** → 本轮全部时间用于修 run45 的失败点。
+
+**run45（`f98045d3`）失败定位（先证据）**
+- job 日志：`STEP 7 项目准备及工具信息 -> failure`，STEP 8~15 全 skipped，**无包无 Release**。
+- 关键行：`.../19d92432-....sh: line 8: APP_VERSION_SUFFIX: unbound variable`
+  （该步骤 `set -euo pipefail` → 直接整 job 挂）。
+- 根因：上一轮 `f98045d3` 在「项目准备及工具信息」的 run 块里新加了
+  `echo "APP_VERSION_SUFFIX=${APP_VERSION_SUFFIX}" >> "$GITHUB_ENV"`，
+  **但该 run 块内存在合法的 `${{ github.* }}` 表达式**，GitHub 做表达式替换时
+  会把同类写法里**未被保护的花括号变量引用一起吞成空串** —— `"$GITHUB_ENV"`
+  被吃掉 → 变成 `echo ... >> ""`（静默失败），文件里从未写入 suffix；
+  STEP 7 自身因 `${APP_VERSION_SUFFIX}` 也在后续行被吞而报 unbound。
+  **与 run41/42/43「suffix 卡死 008」是同一个表达式替换陷阱，只是换了个受害者。**
+- ⚠️ 反直觉点：`"$GITHUB_ENV"`（无花括号）也被吞 —— 该替换针对**取值引用本身**，
+  所以「改用 `$GITHUB_ENV` 规避」是**无效方案**。
+
+**本轮改动（commit `280547e3`，仅 CI 单文件）**
+- `.github/workflows/ios14-test.yml`：
+  1. 版本后缀改为**经文件传递**：`printf '%s\n' "$APP_VERSION_SUFFIX" > dist/app-version-suffix.txt`；
+     打包步骤 `APP_VERSION_SUFFIX=$(cat dist/app-version-suffix.txt)` 读回。
+     **彻底不写 `GITHUB_ENV`**，绕开表达式替换陷阱。
+  2. 注释补第 2 条血泪教训：**run 块内不得出现 `"$GITHUB_ENV"`/`"${GITHUB_ENV}"`**。
+  3. 打包步骤增 `echo "APP_VERSION_SUFFIX=..."` 便于日志核对。
+- suffix 保持 **009**（run45 未出包，009 未被消耗，不递增）。
+
+**验证**
+- `yaml.safe_load` → OK，14 个 step 解析正常。
+- `grep GITHUB_ENV`：剩余唯一一处是「为 Release 重命名」步骤的
+  `echo "RELEASE_IPA_NAME=${NEWNAME}" >> "$GITHUB_ENV"`。**该步骤 run 块不含任何
+  `${{ }}` 字面量**（已逐行确认），故安全，**不动**（避免无关改动）。
+- 触发 run **#46**（`280547e3`），dispatch HTTP 204。
+
+**硬性禁令遵守**：本轮**未触碰任何 `.dart` / WebView 文件** → 与「验证页白屏」路线无关。
+
+**下一步**
+1. 核对 run #46：期望 `app 显示版本: 0.2.28 -> 0.2.28.009` 且 Release `ios14-test-46`
+   的 `ipa-inspection.json` `version == 0.2.28.009`。**若仍 no Release，先补 Release**。
+2. 回降发热主线（本轮未动 Dart）：挑一个低风险增量，候选按序——
+   - `cf_clearance_refresh_service.dart` iOS 前台闲置销毁延时 `_iosIdleDisposeDelay`
+     5min → 收紧（证据：前台静默期常驻 Turnstile JS 把平台线程烧到 60%+，是老设备发烫主因）；
+   - `cf_challenge_service.dart` `_startChallengeRevealProbe` 250ms 轮询；
+   - 路径B：DoH 通道连接复用。
+3. SS 代理接管内置浏览器（并行方向 P0：能力诊断可观测化）。
+
+---
+
+## 2026-10-13 21:00 CST | 路径A：帧监控 summary 空转钳流（去掉空转期的语义树/平台视图全量遍历）
+
+**开工核对（强制流程 0）**
+- 最近 3 次 run = **#46**(`280547e3`, success) / #45(failure, 已在 19:00 轮修复) / #44(failure, 同批修复)。
+- **#46 = ✅ success，且 Release `ios14-test-46` 已生成**（10-13 19:36 CST 发布）：
+  `fluxdo-ios14-test-46-280547e3.ipa`(54,868,783B) + SHA256SUMS + build-info + validation + inspection。
+- 核对版本链路（19:00 轮修的 CI bug 是否真修好）：
+  - `build-info.txt` 含 **`APP_VERSION_SUFFIX=009`** ✅（dist 文件传递方案生效，run45 的
+    `GITHUB_ENV` 被吞问题确认修复）
+  - `ipa-inspection.json` → **`version = 0.2.28.009`**、`build = 2026101311` ✅
+  - tag `ios14-test-46` 指向 `e1bd839e`（注：tag 对象是 softprops 复用的旧 tag 对象，
+    但 Release 的 published_at = 10-13 19:36 CST、资产是 `280547e3` 的 IPA，确认是新发）。
+- → **无未修复 failure、无需补建 Release**，本轮可推进主线。
+
+**本轮证据（先量后改）——路径A：定位常驻 CPU 消耗**
+- `lib/utils/frame_jank_monitor.dart:659`（改前）：summary 输出条件仅为
+  `now - _lastSummary >= _summaryInterval`（10s）+ `_frames > 0`。**没有"有无掉帧"的前置条件。**
+- 该 summary 体（`:661-668`）不是轻活：`SemanticsBinding.instance.semanticsEnabled` 为真时
+  调 `countSemanticsNodes()`（**遍历整棵语义树**）+ `countPlatformViews()`（**遍历平台视图树**）。
+  注释里已标注这两笔是"实打实开销"。
+- 关键放大效应：`_emitSummary` 位于**每帧**都会走的 `_onFrameTiming` 收尾处。DoH 模式 + 常驻
+  CF WebView 的场景下，就算没有掉帧，**空转帧也会持续产生**（与"空转探测"章节描述一致），
+  于是整场会话每 10s 就要在 UI 线程上付一次全量遍历的账 —— 空转期纯烧电。
+- 该开销与诊断总开关 `_started`（`pref_perf_diagnostics`）绑定，**用户开过一次诊断就永久背账**，
+  与 05:30 轮修掉的 `PerfOverlay` 是同一类"常驻采样"问题。
+
+**本轮改动（commit `51a980e6`）**
+`lib/utils/frame_jank_monitor.dart`：
+- 新增 `_windowHadJank`（本窗口是否出过真实 JANK 记录，在 `jankRecords.add(record)` 处置真）与
+  `_lastSummaryFrames`（上次输出时的 `_frames` 水位）。
+- 把 summary 体抽成 `static void _emitSummary()`，**内容逐字未改**（日志格式/字段/统计口径不变）。
+- 输出条件改为：
+  `now - _lastSummary >= (_windowHadJank ? _summaryInterval(10s) : _idleSummaryInterval(60s))`
+  `&& _frames > _lastSummaryFrames`
+  → **有掉帧的窗口保持 10s 节奏（诊断能力零损失）；纯空转窗口拉宽到 60s，日志仍证明监控活着。**
+- 新增常量 `_idleSummaryInterval = Duration(seconds: 60)`。
+- 判据兼用"帧数水位是否前进"，画面全程静止无新帧时不产生任何输出。
+
+**预期收益**：诊断开启且画面空转时，语义树+平台视图遍历频率降到 **原来的 1/6**；
+有掉帧时行为完全不变。老设备（iOS14）上这是稳定的 UI 线程负载削减。
+
+**硬性禁令遵守**：纯 Dart 侧统计节流，**未触碰任何 WebView 文件、未调用
+`pauseTimers`/`resumeTimers`、无任何滚动挂起逻辑**，不阻塞任何 JS 执行。
+
+**本地验证（CI 同款工具链）**
+- `dart format --output=none --set-exit-if-changed lib/utils/frame_jank_monitor.dart`
+  → **0 changed, exit 0**（Dart 3.12.0，/tmp/dartsdk312/dart-sdk）。
+- 用 CI 同款 diff 命令复核：`git diff --name-only --diff-filter=ACMR HEAD~1 HEAD -- '*.dart'`
+  → 仅 `frame_jank_monitor.dart`，format **0 changed, exit 0**。
+- 手工核对：`{}`×198/198 配平；新符号引用计数正确
+  （`_windowHadJank`×5、`_lastSummaryFrames`×3、`_emitSummary`×4、`_idleSummaryInterval`×3）。
+- `dart analyze` 项目级在本容器崩溃（既有环境限制，`Bad state: The analysis server crashed
+  unexpectedly`），同上轮替代方案：靠 format + CI STEP8 的 analyze 把关。
+
+**CI 触发**：run **#47**（`51a980e6`，`APP_VERSION_SUFFIX` `009 → 010`），dispatch HTTP 204，
+启动即 in_progress。
+
+**下一步**
+1. 核对 run #47：期望 STEP8 格式与静态分析通过 + 出包 + Release `ios14-test-47`，
+   且 `ipa-inspection.json` `version == 0.2.28.010`。**若 STEP8 失败（analyze --fatal-infos 拦下），
+   下一轮第一优先级修它。**
+2. 回降发热主线候选（按序）：
+   - `cf_clearance_refresh_service.dart` iOS 前台闲置销毁延时 `_iosIdleDisposeDelay`
+     5min → 收紧（证据：前台静默期常驻 Turnstile JS 把平台线程烧到 60%+）；
+   - 路径B：DoH 通道连接复用（rhttp/Dio 是否每请求新建连接）；
+   - `cf_challenge_service.dart` `_startChallengeRevealProbe` 250ms 轮询。
+3. SS 代理接管内置浏览器（并行方向 P0：能力诊断可观测化）。
