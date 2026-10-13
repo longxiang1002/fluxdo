@@ -18,6 +18,7 @@ import 'network_http_adapter.dart';
 import '../../../l10n/s.dart';
 import 'rhttp_adapter.dart';
 import 'webview_http_adapter.dart';
+import 'webview_bridge_diagnostics.dart';
 import 'apple_transport_policy.dart';
 import '../doh/doh_route_diagnostics.dart';
 import '../../diagnostics/ios14_diagnostics.dart';
@@ -457,6 +458,13 @@ class _GatewayAdapterWrapper implements HttpClientAdapter {
   }
 }
 
+/// D2: 同源静态图片是否分流到原生 Dio 直连（默认开启）。
+///
+/// 置为 false 即整体回退到「同源图片走 WebView 桥」的旧行为，用于实测
+/// CF 403/拦截率升高时的一行回退。仅影响 [WebViewHttpAdapter.resourceKindImage]
+/// 分支，不动 API/写请求的桥路由。
+bool imageNativeRoutingEnabled = true;
+
 /// 判断请求本身是否能由 WebView 适配器承载，不考虑当前兼容模式开关。
 /// 用于 CF 恢复在弹出兼容提示前确认该请求确实可以被浏览器网络栈接管。
 bool requestCanUseWebViewAdapter(RequestOptions options) {
@@ -481,6 +489,20 @@ bool requestCanUseWebViewAdapter(RequestOptions options) {
   // JS 也不能读取响应字节。图片流仅允许同源请求，其它 stream 请求
   //（MessageBus、下载等）仍不走 WebView。
   if (resourceKind == WebViewHttpAdapter.resourceKindImage) {
+    // D2: 同源静态图片默认分流到原生 Dio 直连。
+    //
+    // 图片是刷帖时体量最大的走桥负载：每个响应都要经
+    // 「JS fetch → WebMessageChannel 分块回传」跨桥，活跃滚动时是主要 CPU 源。
+    // 图片本身不参与 CF Bot Management 的指纹判定（CF 拦的是导航/API 的
+    // challenge），因此把同源图片交给原生栈可显著削减桥负载。
+    //
+    // 可回退：`skipWebViewAdapter` 仍是最高优先级的强制原生开关；
+    // 若实测出现 CF 403/拦截率升高，把 [imageNativeRoutingEnabled] 置回 false
+    // 即可恢复「同源图片走桥」的旧行为（一行回退，无需改调用方）。
+    if (imageNativeRoutingEnabled) {
+      WebViewBridgeDiagnostics.instance.imageRoutedNative++;
+      return false;
+    }
     return (method == 'GET' || method == 'HEAD') &&
         isBinaryResponse &&
         WebViewAdapterSettingsService.instance.canUseWebView(uri);

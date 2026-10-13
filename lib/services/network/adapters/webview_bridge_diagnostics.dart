@@ -57,6 +57,12 @@ class WebViewBridgeDiagnostics {
   /// D3: 批量取数累计覆盖的 name 数（用于估算省下的枚举次数）。
   int cookieBatchCountNames = 0;
 
+  /// D2: 因「同源图片分流到原生栈」而从桥上省下的请求数。
+  ///
+  /// 这些请求本会走「JS fetch → WebMessageChannel 分块回传」的重路径；
+  /// 分流后由原生 Dio 直连。计数用于量化本轮省下的桥负载规模。
+  int imageRoutedNative = 0;
+
   /// D2: 当前 WebView 会话是否已完成过一次 cookie 边界同步（sweepAll）。
   ///
   /// `prime()` 幂等（只灌一次），但紧随其后的 `sweepAll()` 不是——它对
@@ -112,5 +118,6 @@ class WebViewBridgeDiagnostics {
     cookieSweepsSkipped = 0;
     cookieBatchCountCalls = 0;
     cookieBatchCountNames = 0;
+    imageRoutedNative = 0;
   }
 }

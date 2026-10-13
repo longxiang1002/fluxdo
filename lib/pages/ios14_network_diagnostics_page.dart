@@ -183,6 +183,7 @@ class _Ios14NetworkDiagnosticsPageState
       'cookieSweepsSkipped': s.cookieSweepsSkipped,
       'cookieBatchCountCalls': s.cookieBatchCountCalls,
       'cookieBatchCountNames': s.cookieBatchCountNames,
+      'imageRoutedNative': s.imageRoutedNative,
     };
   }
 
@@ -260,6 +261,11 @@ class _Ios14NetworkDiagnosticsPageState
             ' / API 读 ${_bridge.apiGet} / 写 ${_bridge.apiWrite}'
             ' / 其他 ${_bridge.other}）',
           ),
+          if (_bridge.imageRoutedNative > 0)
+            Text(
+              '同源图片已分流原生直连：${_bridge.imageRoutedNative} 次'
+              '（D2：这些请求不再走 JS fetch + 分块回传的桥路径）',
+            ),
           Text(
             '响应字节：共 ${_bridge.totalResponseBytes}B'
             '（文本 ${_bridge.textResponseBytes}B / 二进制流 ${_bridge.streamResponseBytes}B）',
