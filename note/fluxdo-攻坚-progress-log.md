@@ -893,3 +893,144 @@ VPN App 能改）。因此「把 `127.0.0.1:<port>` 塞进系统代理让 WKWebV
 2. 若 #39 绿：立项「DNS H2 keep-alive 空闲心跳」单独一轮（Rust patch，可归因）。
 3. 继续扫 `cf_challenge_service.dart:1287` 的 1s 超时轮询
    （`_pollCfClearance()` 每秒一趟）——验证期外是否也可能常驻。
+
+---
+
+## 2026-10-13 11:00 CST — 路径A：CF 验证页兜底轮询「后台降频」
+
+**CI 前置核对**：run #39 `5bb5f1a0`(id `38335481990`) = ✅ success；
+Release `ios14-test-39` 已发布（10-13 10:33 CST，ipa 54,870,040B + 四个附件）。
+无未修复 failure、无需补建 Release。
+
+**本轮改动** | commit `5c73bac4` | `lib/services/cf_challenge_service.dart` +
+`.github/workflows/ios14-test.yml`（`APP_VERSION_SUFFIX` 005 → 006）
+
+**证据（先量后改）**
+- `cf_challenge_service.dart:1287` 原 `Timer.periodic(const Duration(seconds:1))`，
+  `_CfChallengePageState` **没有** `WidgetsBindingObserver`、全文件无
+  `didChangeAppLifecycleState` → 切后台后 1Hz 照跑。
+- 每个节拍不空转：`_pollCfClearance()`(`:1466`) → `_cookieManager.getCookie()`
+  = 一趟**平台主线程 IPC**。后台 60 次/分 + 微任务，iOS 计入发热。
+- 验证页是模态遮罩（登录 / 手动验证 / 网络设置），用户极易挂后台 → 命中率高。
+
+**改动**
+- 加 `with WidgetsBindingObserver` + `initState` 注册 / `dispose` 反注册；
+  `_appLifecycleState` 快照 `WidgetsBinding.instance.lifecycleState`。
+- `_timeoutTickInterval`：`resumed` → **1s（前台一字未改）**，否则 → **3s**
+  （`_backgroundTickInterval`）。后台唤醒 60/min → **20/min（-67%）**。
+- 定时器回调从匿名闭包抽成 `_onTimeoutTick(Timer)`，**逻辑逐字未改**；
+  `_restartTimeoutTicker()` 幂等重建；`_startTimeout()` 只换节拍常量。
+- 附带：`_hasTimedOut` 之后的「死循环空转」一并削掉（超时后 1Hz 毫无用处）。
+
+**精度/体验**：前台 1Hz 零变化；后台超时由 10s → 30s 才 promote
+（10s 太短，切走等短信会被强行拉回，30s 更合理）。仅影响 `startInBackground`。
+
+**硬性禁令**：未碰 WebView；未调 `pauseTimers`/`resumeTimers`；未引滚动挂起。
+只改本页自己的 Dart Timer，**不阻塞任何 JS 执行**，与「验证页白屏」路线无关。
+
+**本地验证**：CI 同款 `dart format --set-exit-if-changed` → **1 file 0 changed**
+exit 0；`dart analyze` 项目级分析器在本容器崩溃（既有环境限制），
+改以括号配平 + 新增符号引用计数 + `git diff` 逐行复核代替。
+
+**本轮 CI**：触发 run **#40**（`5c73bac4`，`APP_VERSION_SUFFIX` `005 → 006`）。
+
+**下一步**
+1. 核对 run #40 出包 + Release `ios14-test-40`。
+2. 老板实机：DoH + 触发验证页后切后台，对比 0.2.28.005 vs .006。
+3. 仍未动的候选（留后续单轮）：
+   - `cf_challenge_service.dart:1811` `_startRevealedStateWatcher` 的
+     `while(true)` + 150ms `evaluateJavascript` 常驻（仅 iOS/Android 有用，
+     且没有「切后台降频」）——**注意：改 JS 探测频率属于触碰 WebView 交互，
+     需单独论证不阻塞 JS，且要用页面可见性而非挂起**。
+   - `cf_challenge_service.dart:1857` `_startChallengeRevealProbe` 的 250ms 轮询
+     （有 20 次硬上界，风险低）。
+   - `dns.rs:1253` `http2_keep_alive_while_idle(true)`（Rust，单独一轮，便于归因）。
+
+---
+
+## 2026-10-13 12:00 CST（北京时间）｜路径A：CF 验证页 reveal 看门狗自适应降频
+
+**CI 前置核对（强制第 0 步）**
+- **#40** `5c73bac4`(id `38339862468`) = ✅ **success**；Release `ios14-test-40`
+  已发布（`fluxdo-ios14-test-40-5c73bac4.ipa` + SHA256SUMS + build-info +
+  validation + inspection）。#39 亦 success + Release 在。
+- → **无未修复 failure、无需补建 Release**，可推进。
+
+**证据（先量后改）**
+- `cf_challenge_service.dart:1869` `_startRevealedStateWatcher()` = `while(true)`
+  **无上界**异步循环，节拍 `_revealStateWatchInterval = 150ms`（`:861`）。
+- 每拍 `:1898` `controller.evaluateJavascript('document.documentElement.innerHTML')`
+  —— **整页 innerHTML 跨边界拉回 Dart**（大字符串 JS 求值 + 传输），
+  **6.7 次/秒**。只要验证页可见且未超时，就无限跑，且无生命周期感知（后台照跑）。
+- 比上轮修的 `_timeoutTimer`(1Hz) 更重：同源同类问题，只是藏在「兜底看门狗」语义下。
+
+**改动（commit `9da67d1c`，`lib/services/cf_challenge_service.dart` + workflow）**
+- 新增 `_revealStateWatchFastTicks = 20`、`_revealStateWatchIdleInterval = 600ms`；
+  循环加 `tick` 计数：前 20 拍（≈3s）保持 **150ms**（正常 CF 跳转在数百 ms 内，
+  灵敏度零变化），之后放宽到 **600ms（-75%）**。
+- 新增 `if (_appLifecycleState != AppLifecycleState.resumed) continue;`：
+  **后台不跑 evaluateJavascript**（回到前台由 `_onAppLifecycleChanged` 恢复兜底）。
+- **禁令遵守**：仅改 Dart 侧 `Future.delayed` 时长 + Dart 侧判断；
+  **无 `pauseTimers`/`resumeTimers`**、无滚动挂起、未改 JS handler 注册。
+  WebView 的 JS 照常执行 → 不阻塞 JS，与白屏路线无关。已在 doc comment 显式声明。
+
+**本地验证**：CI 同款 `dart format --set-exit-if-changed` → 1 file **0 changed**，exit 0；
+括号配平 0；新增符号引用计数正确；`git diff` 复核判据/退出条件逐字未改。
+`dart analyze` 项目级仍在本容器崩溃（既有环境限制），沿用替代核对。
+
+**本轮 CI**：触发 run **#41**（`9da67d1c`，`APP_VERSION_SUFFIX` `006 → 007`）。
+
+**下一步**
+1. 核对 run #41 出包 + Release `ios14-test-41`。
+2. 老板实机：DoH + 停在验证页不操作，对比 0.2.28.006 vs .007 发热。
+3. 仍未动的候选（留后续单轮）：
+   - `cf_challenge_service.dart` `_startChallengeRevealProbe` 的 250ms 轮询
+     （有 20 次硬上界，风险低，收益也小）。
+   - `presence_service.dart:87` 30s 心跳（`_queuePresenceUpdate`，含网络上报）
+     —— 值得单轮量一下 DoH 模式下是否必要。
+   - `dns.rs:1253` `http2_keep_alive_while_idle(true)`（Rust，单独一轮，便于归因）。
+
+---
+
+## 2026-10-13 14:00 CST（北京时间）｜路径A：Presence 心跳「后台静默」
+
+**CI 前置核对（强制第 0 步）**
+- **#41** `9da67d1c`(id `38344469187`) = ✅ **success**；
+  Release `ios14-test-41` 已发布（10-13 12:38 CST，ipa 54,868,656B + 四附件）。
+  #40 亦 success + Release 在。→ **无未修复 failure、无需补建 Release**，可推进。
+
+**证据（先量后改）**
+- `presence_service.dart:87`(改前) `Timer.periodic(_heartbeatInterval)`，
+  `= 30s`。心跳体是**一趟会出网的 POST**（`_queuePresenceUpdate` →
+  `DiscourseService.updatePresence`）。
+- **无生命周期感知**：`PresenceService` 不监听 App 生命周期、全文件无
+  `AppLifecycle` 引用；只要回复框打开（`reply_sheet.dart:287`
+  `enterReplyChannel` → `_startHeartbeat`），**退后台后仍每 30s 发一次**。
+  DoH 模式下该 POST 还要绕本地网关（网关往返 + TLS + 射频唤醒）。
+- 有上界（仅 `_activeChannels` 非空时发）→ 修复面小、收益有界。
+
+**改动（commit `fe78aba4`，`lib/services/presence_service.dart` + workflow）**
+- 加 `AppLifecycleListener? _lifecycleListener` + `bool _isForeground`
+  （沿用 `log_writer.dart:136` 既有写法）；`_startHeartbeat` 懒挂监听；
+  心跳 tick 开头 `if (!_isForeground) return;` → **后台不发心跳**。
+- `_onLifecycleState`：回前台且频道非空时**立即补一次**，补齐静默期；
+  `dispose()` 增加 listener 释放。前台 30s / 1s 节流 / 500ms 防抖**逐字未改**。
+- **禁令遵守**：纯 Dart 定时器 + 生命周期判断，**不碰 WebView、无
+  `pauseTimers`/`resumeTimers`、无滚动挂起**，与「验证页白屏」路线无关。
+
+**本地验证**：CI 同款 `dart format --set-exit-if-changed`（Dart 3.12.0）→
+先报格式差异，用 CI 同款 SDK 格式化后 **0 changed**，exit 0；
+`{}`×38/38、`()`×100/100、`[]`×9/9 配平；新增符号引用计数正确。
+`dart analyze` 项目级仍在本容器崩溃（既有环境限制），沿用替代核对。
+
+**本轮 CI**：触发 run **#42**（`fe78aba4`，`APP_VERSION_SUFFIX` `007 → 008`）。
+
+**下一步**
+1. 核对 run #42 出包 + Release `ios14-test-42`。
+2. 老板实机：DoH + 打开回复框后切后台，对比 0.2.28.007 vs .008 发热。
+3. 仍未动的候选（留后续单轮）：
+   - `cf_challenge_service.dart` `_startChallengeRevealProbe` 250ms 轮询
+     （20 次硬上界，收益小）。
+   - `dns.rs:1253` `http2_keep_alive_while_idle(true)`（Rust，单独一轮便于归因）。
+   - 路径B：DoH 通道连接复用（rhttp/Dio 是否每请求新建连接）。
+   - SS 代理接管内置浏览器（并行方向 P0：能力诊断可观测化）。
