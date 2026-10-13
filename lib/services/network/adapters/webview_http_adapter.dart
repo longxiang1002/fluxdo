@@ -511,9 +511,7 @@ document.close();
       bridgeStats.textResponses++;
       bridgeStats.textResponseBytes += bodyContent.length;
       bridgeStats.totalMs += totalWatch.elapsedMilliseconds;
-      if (jsEvalElapsed != null) {
-        bridgeStats.jsEvalMs += jsEvalElapsed.inMilliseconds;
-      }
+      bridgeStats.jsEvalMs += jsEvalElapsed.inMilliseconds;
 
       return ResponseBody.fromString(
         bodyContent,
@@ -761,9 +759,7 @@ document.close();
     final bridgeStats = WebViewBridgeDiagnostics.instance;
     bridgeStats.streamResponses++;
     bridgeStats.totalMs += totalWatch.elapsedMilliseconds;
-    if (jsEvalElapsed != null) {
-      bridgeStats.jsEvalMs += jsEvalElapsed.inMilliseconds;
-    }
+    bridgeStats.jsEvalMs += jsEvalElapsed.inMilliseconds;
 
     bridge.done.whenComplete(() {
       bridgeStats.streamResponseBytes += bridge.bytesReceived;
