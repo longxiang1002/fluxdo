@@ -66,10 +66,20 @@ jobs:
           mkdir -p dist
           dart tool/project_prep.dart app
           { git rev-parse HEAD; git submodule status; flutter --version; dart --version; rustc --version; xcodebuild -version; } > dist/build-info.txt 2>&1
-          # 把「本次上传的 app 版本后缀」写进 build-info，让版本号从"日志里的一句话"
-          # 变成可核对的事实。此前 suffix 被 GitHub 表达式替换吞掉、静默退回默认值，
-          # 只靠人肉读日志根本发现不了（run41/42/43 连续三轮后缀卡死在 008）。
+          # 本次上传的 app 版本后缀写在文件里（单一事实来源），后续步骤从文件读。
+          #
+          # ⚠️ 两条血泪教训（勿回退）：
+          # 1) 值必须写成纯字面量。GitHub 会对 run 块整体做表达式替换，替换时会
+          #    连带吞掉未被保护的花括号变量引用，带 :- 默认值的写法
+          #    （APP_VERSION_SUFFIX="\${APP_VERSION_SUFFIX:-008}"）会退化成纯文本、
+          #    静默取默认值——run41/42/43 后缀连续三轮卡死在 0.2.28.008 正是此因。
+          # 2) 不要在 run 块里写 "$GITHUB_ENV" / "${GITHUB_ENV}"。同样是表达式替换，
+          #    花括号引用会被吃成空串，于是变成 `echo ... >> ""` 静默失败，且该步骤
+          #    开了 set -u，后续步骤读不到变量直接 unbound variable 整个 job 挂掉
+          #    （run45 的 STEP 7 failure 就是这么来的）。改走 dist/ 下的文件传递。
+          APP_VERSION_SUFFIX="009"
           echo "APP_VERSION_SUFFIX=${APP_VERSION_SUFFIX}" >> dist/build-info.txt
+          printf '%s\n' "$APP_VERSION_SUFFIX" > dist/app-version-suffix.txt
       - name: 格式与静态分析
         shell: bash
         run: |
@@ -115,20 +125,16 @@ jobs:
           # CFBundleShortVersionString。CFBundleVersion（内部版本号）保持
           # 递增（--build-number 由当前时间生成），TrollStore 覆盖安装不受影响。
           #
-          # ⚠️ 这里**绝不能**写成 APP_VERSION_SUFFIX="\${APP_VERSION_SUFFIX:-008}"。
-          # GitHub 对 run 块整体做表达式替换，替换时会顺手吃掉同类脚本里未被
-          # 保护的花括号变量引用：变量名连同花括号一起被匹配掉，带 :- 默认值的
-          # 写法会退化成纯文本，于是静默取默认值。run41/42/43 的版本后缀连续
-          # 三轮卡死在 0.2.28.008 就是这个原因（同一个 run 块里的 SHORT、APP_PLIST
-          # 之类也被吃成空串，只是恰好都有别处兜底才没暴露）。
-          # 兜底策略：直接写死字面量，不再依赖 :- 默认值语法。每轮发版把这里 +1，
-          # 并同步核对 build-info.txt 的 APP_VERSION_SUFFIX 行与 ipa-inspection.json。
-          APP_VERSION_SUFFIX="009"
+          # 版本后缀由「项目准备及工具信息」步骤写入 dist/app-version-suffix.txt
+          # （不用 $GITHUB_ENV：run 块里的花括号变量引用会被 GitHub 表达式替换
+          # 吃成空串，见那里的注释；run45 STEP 7 就是这么挂的）。
+          APP_VERSION_SUFFIX=$(cat dist/app-version-suffix.txt)
           APP_PLIST="$RUNNER_TEMP/ios14-package/Payload/Runner.app/Info.plist"
           BASE_VER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PLIST")
           NEW_VER="${BASE_VER}.${APP_VERSION_SUFFIX}"
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${NEW_VER}" "$APP_PLIST"
           echo "app 显示版本: ${BASE_VER} -> ${NEW_VER}"
+          echo "APP_VERSION_SUFFIX=${APP_VERSION_SUFFIX}"
 
           (cd "$RUNNER_TEMP/ios14-package" && zip -qry "$GITHUB_WORKSPACE/dist/fluxdo-ios14-test-unsigned.ipa" Payload)
           python3 scripts/ci/inspect_ios14_ipa.py dist/fluxdo-ios14-test-unsigned.ipa --output dist/ipa-inspection.json
