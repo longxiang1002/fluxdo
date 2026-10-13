@@ -12,8 +12,7 @@
 class WebViewBridgeDiagnostics {
   WebViewBridgeDiagnostics._();
 
-  static final WebViewBridgeDiagnostics instance =
-      WebViewBridgeDiagnostics._();
+  static final WebViewBridgeDiagnostics instance = WebViewBridgeDiagnostics._();
 
   /// 按请求类别聚合的计数器。
   int imageSameOrigin = 0;
