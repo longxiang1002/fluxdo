@@ -136,6 +136,13 @@ class FrameJankMonitor {
   /// Logcat 汇总输出间隔
   static const _summaryInterval = Duration(seconds: 10);
 
+  /// 纯空转窗口的汇总间隔(钳流,见 [_emitSummary] 调用点的注释)。
+  ///
+  /// 没有掉帧时 summary 只是"一切正常"的复读,却要在 UI 线程上遍历语义树
+  /// 与平台视图树。拉宽到 1 分钟后,日志仍能证明监控活着,而空转期的
+  /// 采样开销降到原来的 1/6。
+  static const _idleSummaryInterval = Duration(seconds: 60);
+
   static const _maxJankRecords = 500;
   static const _maxEvents = 300;
 
@@ -182,6 +189,14 @@ class FrameJankMonitor {
 
   // Logcat 10s 窗口
   static int _frames = 0;
+
+  /// 本窗口内是否发生过真实 JANK 记录(驱动 summary 的空转钳流,见下)。
+  static bool _windowHadJank = false;
+
+  /// 上一次 summary 输出的**帧数**进度。summary 的重活在语义树/平台视图
+  /// 统计上(见 [_emitSummary]),只有帧数真正前进才值得再付出一次。
+  static int _lastSummaryFrames = 0;
+
   static int _janks = 0;
   static Duration _worstBuild = Duration.zero;
   static Duration _worstRaster = Duration.zero;
@@ -642,6 +657,7 @@ class FrameJankMonitor {
         _lastImageCacheBytes =
             PaintingBinding.instance.imageCache.currentSizeBytes;
         jankRecords.add(record);
+        _windowHadJank = true;
         if (jankRecords.length > _maxJankRecords) {
           jankRecords.removeRange(0, jankRecords.length - _maxJankRecords);
         }
@@ -655,24 +671,44 @@ class FrameJankMonitor {
     }
     if (changed) _bumpRevision();
 
+    // summary 里最贵的两笔是 SemanticsBinding.semanticsEnabled 下的
+    // countSemanticsNodes() 与 countPlatformViews():它们要遍历语义树与
+    // 平台视图树,是 UI 线程上的实打实开销。老设备(尤其 iOS14)上
+    // "没有掉帧"恰恰是常态,于是这个 10s 定时账单会在整场会话里持续为
+    // 空转帧重复付款。
+    //
+    // 钳流规则:窗口内出现过真实 JANK 记录(_windowHadJank)才允许按
+    // _summaryInterval 输出;纯空转窗口拉宽到 _idleSummaryInterval。
+    // 判据兼用"帧数相对窗口起点是否前进"(_lastSummaryFrames),避免在
+    // 画面全程静止、压根没有新帧时无谓输出。
     final now = DateTime.now();
-    if (now.difference(_lastSummary) >= _summaryInterval && _frames > 0) {
-      final semanticsEnabled = SemanticsBinding.instance.semanticsEnabled;
-      debugPrint(
-        '[JANK] summary: $_janks/$_frames janky, '
-        'worst build ${_ms(_worstBuild)}ms, '
-        'worst raster ${_ms(_worstRaster)}ms, '
-        'budget ${(budgetUs / 1000).toStringAsFixed(1)}ms'
-        '@${displayRefreshRate()?.toStringAsFixed(0) ?? '?'}Hz, '
-        'semantics: ${semanticsEnabled ? countSemanticsNodes() : 'off'}, '
-        'platform views: ${countPlatformViews()}',
-      );
+    final effectiveInterval = _windowHadJank
+        ? _summaryInterval
+        : _idleSummaryInterval;
+    if (now.difference(_lastSummary) >= effectiveInterval &&
+        _frames > _lastSummaryFrames) {
+      _emitSummary();
+      _lastSummaryFrames = _frames;
       _lastSummary = now;
       _frames = 0;
       _janks = 0;
+      _windowHadJank = false;
       _worstBuild = Duration.zero;
       _worstRaster = Duration.zero;
     }
+  }
+
+  static void _emitSummary() {
+    final semanticsEnabled = SemanticsBinding.instance.semanticsEnabled;
+    debugPrint(
+      '[JANK] summary: $_janks/$_frames janky, '
+      'worst build ${_ms(_worstBuild)}ms, '
+      'worst raster ${_ms(_worstRaster)}ms, '
+      'budget ${(budgetUs / 1000).toStringAsFixed(1)}ms'
+      '@${displayRefreshRate()?.toStringAsFixed(0) ?? '?'}Hz, '
+      'semantics: ${semanticsEnabled ? countSemanticsNodes() : 'off'}, '
+      'platform views: ${countPlatformViews()}',
+    );
   }
 
   // ---------------------------------------------------------------------------
