@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'discourse/discourse_service.dart';
 import 'preloaded_data_service.dart';
 
@@ -22,6 +23,18 @@ class PresenceService {
   Timer? _heartbeatTimer;
   static const _heartbeatInterval = Duration(seconds: 30);
 
+  /// 前后台监听：后台期间不发心跳。
+  ///
+  /// 心跳是一趟会出网的 presence POST（DoH 模式下还要绕本地网关），在
+  /// 移动端每 30s 一次会持续唤醒基带/射频；而后台用户看不到「正在输入」
+  /// 状态，这一趟纯属白耗电。故退后台时不发心跳、回前台立即补一次
+  /// （见 [_onLifecycleState]），保证前台语义一字未改。
+  ///
+  /// 该手段只影响本服务自己的定时器与网络上报，不触碰 WebView、不调用任何
+  /// pause/resume WebView API，与「滚动挂起 → iOS 验证页白屏」的路线无关。
+  AppLifecycleListener? _lifecycleListener;
+  bool _isForeground = true;
+
   // 防抖计时器
   Timer? _debounceTimer;
   static const _debounceDelay = Duration(milliseconds: 500);
@@ -41,7 +54,8 @@ class PresenceService {
     // 站点未启用 presence 插件
     if (preloaded.siteSettingsSync?['presence_enabled'] != true) return false;
     // 用户选择隐藏 presence
-    final userOption = preloaded.currentUserSync?['user_option'] as Map<String, dynamic>?;
+    final userOption =
+        preloaded.currentUserSync?['user_option'] as Map<String, dynamic>?;
     if (userOption?['hide_presence'] == true) return false;
     return true;
   }
@@ -58,21 +72,21 @@ class PresenceService {
     _debouncedUpdate();
     _startHeartbeat();
   }
-  
+
   /// 离开回复频道
   void leaveReplyChannel(int topicId) {
     final channel = '/discourse-presence/reply/$topicId';
     if (!_activeChannels.contains(channel)) return;
-    
+
     debugPrint('[PresenceService] 离开频道: $channel');
     _activeChannels.remove(channel);
     _queuePresenceUpdate(leaveChannels: [channel]);
-    
+
     if (_activeChannels.isEmpty) {
       _stopHeartbeat();
     }
   }
-  
+
   /// 防抖更新
   void _debouncedUpdate() {
     _debounceTimer?.cancel();
@@ -80,24 +94,47 @@ class PresenceService {
       _queuePresenceUpdate(presentChannels: _activeChannels.toList());
     });
   }
-  
+
   /// 启动心跳
   void _startHeartbeat() {
     _heartbeatTimer?.cancel();
+    _ensureLifecycleListener();
     _heartbeatTimer = Timer.periodic(_heartbeatInterval, (_) {
+      // 后台不发心跳：一趟会出网的 presence POST（DoH 下还绕本地网关），
+      // 后台用户看不到「正在输入」，纯属于唤醒射频白耗电。
+      if (!_isForeground) return;
       if (_activeChannels.isNotEmpty) {
         debugPrint('[PresenceService] 心跳: ${_activeChannels.length} 个频道');
         _queuePresenceUpdate(presentChannels: _activeChannels.toList());
       }
     });
   }
-  
+
+  /// 懒挂生命周期监听（有活跃频道时才需要）。
+  void _ensureLifecycleListener() {
+    if (_lifecycleListener != null) return;
+    _isForeground =
+        WidgetsBinding.instance.lifecycleState == null ||
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+    _lifecycleListener = AppLifecycleListener(onStateChange: _onLifecycleState);
+  }
+
+  /// 前后台切换：回前台立即补一次心跳（补齐后台静默期），期间不发。
+  void _onLifecycleState(AppLifecycleState state) {
+    final foreground = state == AppLifecycleState.resumed;
+    if (foreground == _isForeground) return;
+    _isForeground = foreground;
+    if (foreground && _activeChannels.isNotEmpty) {
+      _queuePresenceUpdate(presentChannels: _activeChannels.toList());
+    }
+  }
+
   /// 停止心跳
   void _stopHeartbeat() {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
   }
-  
+
   void _queuePresenceUpdate({
     List<String>? presentChannels,
     List<String>? leaveChannels,
@@ -160,7 +197,8 @@ class PresenceService {
       );
     } finally {
       _updateInFlight = false;
-      if (_pendingPresentChannels.isNotEmpty || _pendingLeaveChannels.isNotEmpty) {
+      if (_pendingPresentChannels.isNotEmpty ||
+          _pendingLeaveChannels.isNotEmpty) {
         _scheduleQueuedUpdate();
       }
     }
@@ -180,14 +218,16 @@ class PresenceService {
       debugPrint('[PresenceService] Update failed: $e');
     }
   }
-  
+
   /// 释放资源
   void dispose() {
     debugPrint('[PresenceService] 释放资源');
     _debounceTimer?.cancel();
     _heartbeatTimer?.cancel();
     _throttleTimer?.cancel();
-    
+    _lifecycleListener?.dispose();
+    _lifecycleListener = null;
+
     // 离开所有频道
     if (_activeChannels.isNotEmpty) {
       _updatePresence(leaveChannels: _activeChannels.toList());
