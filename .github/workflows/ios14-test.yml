@@ -23,6 +23,26 @@ jobs:
           fetch-depth: 0
           submodules: recursive
           persist-credentials: false
+      # core/doh_proxy 是 submodule（Lingyan000/fluxdo_doh），本分支没有其推送权限，
+      # 因此 Rust 侧改动以 patch 形式 vendor 在本仓库 patches/ 下，checkout 后在此应用。
+      # 幂等：已应用（含被子模块 pin 自然包含）则跳过；应用失败显式报错，不静默继续。
+      - name: 应用已 vendor 的 Rust 网关补丁
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          applied=0
+          for p in patches/*.patch; do
+            if (cd core/doh_proxy && git apply --reverse --check "$GITHUB_WORKSPACE/$p" >/dev/null 2>&1); then
+              echo "已有: $(basename "$p")（补丁已应用，跳过）"
+              continue
+            fi
+            echo "应用: $(basename "$p")"
+            (cd core/doh_proxy && git apply --verbose "$GITHUB_WORKSPACE/$p")
+            applied=$((applied + 1))
+          done
+          echo "本次应用补丁数: ${applied}"
+          (cd core/doh_proxy && git status --short)
       - name: 固定 Xcode 与 Flutter
         shell: bash
         run: |
@@ -90,7 +110,7 @@ jobs:
           # pubspec 保持 0.2.28，这里在打包前改写 Runner.app 内 Info.plist 的
           # CFBundleShortVersionString。CFBundleVersion（内部版本号）保持
           # 递增（--build-number 由当前时间生成），TrollStore 覆盖安装不受影响。
-          APP_VERSION_SUFFIX="${APP_VERSION_SUFFIX:-003}"
+          APP_VERSION_SUFFIX="${APP_VERSION_SUFFIX:-004}"
           APP_PLIST="$RUNNER_TEMP/ios14-package/Payload/Runner.app/Info.plist"
           BASE_VER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PLIST")
           NEW_VER="${BASE_VER}.${APP_VERSION_SUFFIX}"

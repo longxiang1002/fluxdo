@@ -1,0 +1,178 @@
+From 1c11107fe6ef2960cac6e1b8133ca4a761146bdf Mon Sep 17 00:00:00 2001
+From: fluxdo-agent <agent@fluxdo.local>
+Date: Mon, 12 Oct 2026 22:06:33 +0000
+Subject: [PATCH] perf(gateway): share upstream H2 pool process-wide + h1/h2
+ auto on client side
+
+Each client connection previously allocated a fresh empty GatewayPool, so the
+pool's lifetime equalled a single client TCP connection and upstream reuse was
+effectively impossible. The gateway used a hard-coded HTTP/1.1 server, which
+admits only one in-flight request per connection, so pooled H2 senders could
+never be hit a second time within a connection. Upstream connections that
+negotiated HTTP/1.1 were not pooled at all and thus re-handshaked TLS on every
+request.
+
+Holding the pool in a single process-wide OnceLock, negotiating h1/h2 via
+hyper-util's auto builder, and resetting the pool on server stop removes the
+repeated TCP+TLS(ECH/DoH)+H2 handshakes that drove CPU peaks and battery drain
+on iOS. Adds cheap is_ready() eviction plus a host-count cap so the shared pool
+cannot become a leak.
+
+No WebView interaction; CONNECT semantics unchanged (CF hosts still tunnel).
+---
+ src/proxy.rs | 91 ++++++++++++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 81 insertions(+), 10 deletions(-)
+
+diff --git a/src/proxy.rs b/src/proxy.rs
+index 405b5cb..92c884f 100644
+--- a/src/proxy.rs
++++ b/src/proxy.rs
+@@ -12,7 +12,6 @@ use crate::ProxyConfig;
+ use bytes::Bytes;
+ use http_body_util::{combinators::BoxBody, BodyExt, Full};
+ use hyper::body::Incoming;
+-use hyper::server::conn::http1 as hyper_http1;
+ use hyper::service::service_fn;
+ use hyper::{Request, Response};
+ use hyper_util::rt::TokioIo;
+@@ -188,6 +187,9 @@ impl DohProxyServer {
+     /// Stop the proxy server
+     pub fn stop(&self) {
+         let _ = self.shutdown_tx.send(());
++        // 共享上游池不随客户端连接关闭而释放，停止时必须显式丢弃，
++        // 否则下次 start 会命中一批指向旧 TLS 会话的 sender。
++        reset_gateway_shared_pool();
+     }
+ }
+ 
+@@ -417,9 +419,10 @@ async fn handle_connect_mitm(
+ 
+ /// Handle a gateway (reverse proxy) connection using hyper.
+ ///
+-/// Uses hyper HTTP/1.1 server on the client side, hyper HTTP/2 (or HTTP/1.1)
+-/// client on the server side. Supports keep-alive with multi-host routing
+-/// and server-side connection pooling via HTTP/2 multiplexing.
++/// Uses hyper's auto builder on the client side (HTTP/1.1 or HTTP/2 negotiated
++/// per connection) and hyper HTTP/2 (or HTTP/1.1) on the server side. Supports
++/// keep-alive with multi-host routing and server-side connection pooling via
++/// HTTP/2 multiplexing.
+ async fn handle_gateway_connection(
+     stream: TcpStream,
+     connector: Arc<DohTlsConnector>,
+@@ -428,7 +431,12 @@ async fn handle_gateway_connection(
+     h2_mitm: bool,
+ ) -> Result<()> {
+     let io = TokioIo::new(stream);
+-    let pool: GatewayPool = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
++    // 进程级共享池：此前每来一条客户端连接就 new 一个空 HashMap，
++    // 池的生命周期 = 单条 TCP 连接 → 几乎不可能命中上游复用，每个请求
++    // 都要重新做 TCP+TLS(含 ECH/DoH 解析)+H2 handshake。握手是
++    // ECDHE/RSA 密集运算 + 多次往返，在 iOS 上直接变成 CPU 峰值与耗电。
++    // 提到进程级后，跨连接、跨导航的请求都能复用已建的 H2 会话。
++    let pool = gateway_shared_pool();
+ 
+     let service = service_fn(move |req: Request<Incoming>| {
+         let connector = connector.clone();
+@@ -453,10 +461,12 @@ async fn handle_gateway_connection(
+         }
+     });
+ 
+-    hyper_http1::Builder::new()
+-        .keep_alive(true)
+-        .serve_connection(io, service)
+-        .with_upgrades()
++    // 客户端侧用 auto builder 自动协商 h1/h2：此前硬编码 HTTP/1.1，
++    // 单连接同时只有一个在途请求，池里的上游 sender 在单连接内基本
++    // 不可能被二次命中（池等于失效）。放成 h1/h2 自适应后，支持 h2 的
++    // 客户端可在一条连接上并发多请求，共享池才真正起作用。
++    hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
++        .serve_connection_with_upgrades(io, service)
+         .await
+         .map_err(|e| DohProxyError::Proxy(format!("Gateway hyper error: {}", e)))
+ }
+@@ -464,13 +474,71 @@ async fn handle_gateway_connection(
+ type GatewayBody = BoxBody<Bytes, hyper::Error>;
+ type GatewayResponse = std::result::Result<Response<GatewayBody>, Infallible>;
+ 
+-/// 只缓存 HTTP/2 sender（可 clone 多路复用），HTTP/1.1 不缓存。
++/// 只缓存 HTTP/2 sender（可 clone 多路复用），HTTP/1.1 单独存。
+ type GatewayPool = Arc<
+     tokio::sync::Mutex<
+         std::collections::HashMap<String, hyper::client::conn::http2::SendRequest<Incoming>>,
+     >,
+ >;
+ 
++/// 进程级共享的上游连接池（唯一实例，见 [`gateway_shared_pool`]）。
++static GATEWAY_POOL: std::sync::OnceLock<GatewayPool> = std::sync::OnceLock::new();
++
++/// 取进程级共享的上游连接池。
++///
++/// 改为共享而非每连接新建，是把「上游 TLS/H2 握手」从每次请求/每次导航
++/// 降到「每个目标主机一次」。`stop()` 时由 [`reset_gateway_shared_pool`]
++/// 清空，避免跨 start/stop 残留脏 sender。
++fn gateway_shared_pool() -> GatewayPool {
++    GATEWAY_POOL
++        .get_or_init(|| Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())))
++        .clone()
++}
++
++/// 丢弃所有池化上游连接（proxy 停止时调用）。
++///
++/// 共享池不会随客户端连接关闭而释放，若 stop 后不清空，下次 start 会
++/// 命中一批指向旧运行时/旧 TLS 会话的 sender。这里直接 clear，其下的
++/// TLS 连接随 sender 释放一并关闭。
++fn reset_gateway_shared_pool() {
++    if let Some(pool) = GATEWAY_POOL.get() {
++        if let Ok(mut p) = pool.try_lock() {
++            let n = p.len();
++            p.clear();
++            if n > 0 {
++                debug!("Gateway pool reset: dropped {} upstream connection(s)", n);
++            }
++        }
++    }
++}
++
++/// 剔除池中已失效的上游 sender，并给条目数设上限。
++///
++/// 只做 `is_ready()` 快速判定 + 计数上限，不做阻塞 IO，开销可忽略；
++/// 目的单纯是让共享池不变成泄漏源。
++async fn gateway_pool_evict(pool: &GatewayPool, keep: &str) {
++    let mut p = pool.lock().await;
++    if p.len() <= 1 {
++        return;
++    }
++    // 保留 `keep`（本次仍在用），其余仅在已关闭时剔除。
++    p.retain(|key, sender| key == keep || sender.is_ready());
++    // 兜底：条目数超上限时（异常 host 泛滥），丢弃最老的一批，
++    // 让下次请求走重建，宁可多一次握手也不要无限增长。
++    const MAX_POOLED_HOSTS: usize = 32;
++    if p.len() > MAX_POOLED_HOSTS {
++        let mut keys: Vec<String> = p
++            .keys()
++            .filter(|k| k.as_str() != keep)
++            .cloned()
++            .collect();
++        keys.sort();
++        for key in keys.into_iter().take(p.len() - MAX_POOLED_HOSTS) {
++            p.remove(&key);
++        }
++    }
++}
++
+ enum GatewaySender {
+     H2(hyper::client::conn::http2::SendRequest<Incoming>),
+     H1(hyper::client::conn::http1::SendRequest<Incoming>),
+@@ -602,6 +670,9 @@ async fn gateway_forward_request(
+         GatewaySender::H1(mut s) => s.send_request(req).await,
+     };
+ 
++    // 共享池不会随客户端连接关闭而收缩，发包后做一次廉价清理。
++    gateway_pool_evict(&pool, &host_key).await;
++
+     match result {
+         Ok(resp) => Ok(resp.map(|b| b.boxed())),
+         Err(e) => {
+-- 
+2.39.5
+

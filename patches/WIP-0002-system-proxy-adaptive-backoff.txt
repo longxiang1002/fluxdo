@@ -1,0 +1,118 @@
+﻿WIP (2026-10-13 06:00, 未提交即被误 `git checkout --` 丢弃, 此处按当时 diff 重建)
+
+目标: SystemProxyService 兜底节拍自适应退避 —— 30s 快节拍在「连续无变化」时翻倍,
+封顶 5min; 任何一次读到变化立即复位回 30s。降低 iOS 上平台通道 IPC +
+阻塞式 CFNetworkCopySystemProxySettings() 系统调用的频率。
+
+背景: 05:00 轮已把 10s → 30s; 本轮把「无变化」的稳态从 30s 再降。
+
+=== 改动 1: lib/services/network/system_proxy_service.dart 常量区 ===
+
+原:
+  /// (注释最后一行) 改了代理」这类改动手机会没有进程内事件,30s 内必被兜到。
+  static const _refreshInterval = Duration(seconds: 30);
+
+新:
+  /// (注释倒数第二行改为) ...故起点放宽到 30s:
+  /// 每次 tick 在 iOS 上是一趟**平台通道 IPC + 阻塞式
+  /// `CFNetworkCopySystemProxySettings()` 系统调用**(见
+  /// `SystemProxyReader.effectiveProxyUrl`),频率越低越省电,而正确性由
+  /// 显式刷新点保证。仍保留周期(而非纯事件驱动)是因为「用户在系统设置里
+  /// 改了代理」这类改动手机会没有进程内事件,须有节拍兜到。
+  static const _refreshInterval = Duration(seconds: 30);
+
+  /// 连续无变化时的退避上限。
+  ///
+  /// 上面那个 30s 是「刚启动、可能有变化」时的快节拍;但只要连着若干轮读到的
+  /// 系统代理都一样,就说明用户没在动它,继续 30s 一跳纯属白烧电——尤其在
+  /// DoH 模式下本服务已经在为「出口一致性」服务,后台/前台都在跑。因此改为
+  /// **自适应退避**:每次读到与上次相同就把间隔翻倍,封顶 [_refreshMaxInterval]。
+  /// 任何一次变化(或显式 [refresh] 走到变化)都会立刻把节拍打回
+  /// [_refreshInterval],保证「改了代理」最慢也在一个下限节拍内被发现。
+  ///
+  /// 代价:用户改完系统代理后,最坏要等 [_refreshMaxInterval] 才被兜底发现。
+  /// 这个代价可接受——真正影响正确性的路径(CF 挑战、前台 resume、每次请求
+  /// 取 [effectiveProxyUrl])都是显式刷新,不依赖这个兜底节拍。
+  static const _refreshMaxInterval = Duration(minutes: 5);
+
+=== 改动 2: 字段区 (bool _started = false; 之后) ===
+
+  /// 当前节拍间隔(自适应退避用)。无变化时翻倍,封顶 [_refreshMaxInterval];
+  /// 一旦读到变化立即回到 [_refreshInterval]。
+  Duration _currentInterval = _refreshInterval;
+
+=== 改动 3: _ensureStarted() 里挂定时器 ===
+
+原:
+    if (!_paused && _refreshTimer == null) {
+      _refreshTimer = Timer.periodic(_refreshInterval, (_) => refresh());
+    }
+
+新:
+    if (!_paused && _refreshTimer == null) {
+      // 重挂定时器时把节拍复位——回前台/重新启动应立刻用快节拍确认一次,
+      // 而不是沿用上次退避到的长间隔。
+      _currentInterval = _refreshInterval;
+      _scheduleNext();
+    }
+
+=== 改动 4: 新增 _scheduleNext() + _tick() (插在 _ensureStarted 之后) ===
+
+  /// 用**单次**定时器实现自适应节拍。
+  ///
+  /// 不用 `Timer.periodic` 是因为间隔要随「有没有变化」动态调整:每次 tick
+  /// 结束后由 [_tick] 决定下一次隔多久。单次链式调度也避免了
+  /// periodic 在间隔改变时必须 cancel+重建的抖动。
+  void _scheduleNext() {
+    _refreshTimer?.cancel();
+    _refreshTimer = Timer(_currentInterval, () {
+      _refreshTimer = null;
+      unawaited(_tick());
+    });
+  }
+
+  /// 一轮兜底采样:读一次系统代理,并按「是否变化」调整下一跳间隔。
+  Future<void> _tick() async {
+    if (_paused) return;
+    // 快节拍只负责「采样」;「有没有变化」由 [_updateEffective] 在读到值后
+    // 统一判定,并把节拍按需打回 [_refreshInterval](见那里的注释)。
+    // 这样显式 [refresh] 与周期 tick 走的是同一套退避复位逻辑。
+    if (Platform.isIOS) {
+      await _refreshIos();
+    } else {
+      refresh();
+    }
+    if (_paused) return;
+    // 本轮无变化 → 间隔翻倍退避,封顶 [_refreshMaxInterval];
+    // 有变化时 [_updateEffective] 已把间隔复位,_currentInterval 就是快节拍。
+    if (_currentInterval < _refreshMaxInterval) {
+      final doubled = _currentInterval * 2;
+      _currentInterval = doubled > _refreshMaxInterval
+          ? _refreshMaxInterval
+          : doubled;
+    }
+    _scheduleNext();
+  }
+
+=== 改动 5: _updateEffective() 里复位节拍 ===
+
+原:
+  void _updateEffective(String? effective) {
+    if (effective == _effectiveProxyUrl) return;
+    debugPrint(
+
+新:
+  void _updateEffective(String? effective) {
+    if (effective == _effectiveProxyUrl) return;
+    // 一旦读到变化,立刻把兜底节拍打回快节拍:变化说明「用户在动代理」,
+    // 此时应当密集确认,而不是继续沿用退避出来的长间隔。显式 [refresh]
+    // (CF 挑战路径、VPN 自动切换)与周期 [_tick] 都会走到这里,故两路一致。
+    _currentInterval = _refreshInterval;
+    debugPrint(
+
+=== 备注 ===
+- 该改动与 DoH 降发热主线同向(降低常驻采样频率),但因「一轮只做一件事」的纪律,
+  且 08:00 轮做的是 Rust 上游连接池,故延后到后续轮次提交。
+- 需补: resume() 走 _ensureStarted() 已复位; pause() 取消定时器已足够。
+- 需补测试: test/services/network/ 下建议加 system_proxy_backoff_test.dart
+  (无变化翻倍 / 有变化复位 / 封顶 5min)。
