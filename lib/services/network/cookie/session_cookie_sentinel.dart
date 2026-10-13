@@ -173,6 +173,9 @@ class SessionCookieSentinel {
       final stats = WebViewBridgeDiagnostics.instance;
       stats.cookieBatchCountCalls++;
       stats.cookieBatchCountNames += names.length;
+      // D3: 把刚读到的计数记进缓存，供随后 sweep 复用（省掉每个 name
+      // 在 _sweepInternal 里再各读一次的全量枚举）。
+      variantsBefore.forEach(stats.rememberVariantCount);
     } catch (e) {
       debugPrint('[Sentinel] sweepAll batch count failed: $e');
       variantsBefore = const {};
@@ -234,6 +237,8 @@ class SessionCookieSentinel {
         final stats = WebViewBridgeDiagnostics.instance;
         stats.cookieBatchCountCalls++;
         stats.cookieBatchCountNames += names.length;
+        // D3: 同 sweepAll —— 批量计数记进缓存供随后 sweep 复用。
+        variantsBefore.forEach(stats.rememberVariantCount);
       } catch (e) {
         debugPrint('[Sentinel] sweepMany batch count failed: $e');
         variantsBefore = const {};
@@ -387,8 +392,23 @@ class SessionCookieSentinel {
     }
 
     // 批量取数注入时直接复用，省掉一次 WV 全量枚举（见 sweepAll）。
-    final variantsBefore =
-        variantsBeforeOverride ?? await _writer.countCookiesByName(url, name);
+    // D3: 其次复用「本批 sweep 的调用方刚读到的」缓存计数——sweepAll /
+    // sweepMany 已经用一次批量调用枚举过全部 name，这里再各读一次纯属重复。
+    // 缓存只在「同一批 sweep 内、尚未发生 WV cookie 变更」时命中；任何
+    // 写入/删除都会 invalidateVariantCounts() 作废，不会用陈旧计数。
+    final stats = WebViewBridgeDiagnostics.instance;
+    final int variantsBefore;
+    if (variantsBeforeOverride != null) {
+      variantsBefore = variantsBeforeOverride;
+    } else {
+      final cached = stats.cachedVariantCount(name);
+      if (cached != null) {
+        variantsBefore = cached;
+        stats.variantCountCacheHits++;
+      } else {
+        variantsBefore = await _writer.countCookiesByName(url, name);
+      }
+    }
 
     if (intent == SweepIntent.delete) {
       return await _sweepDelete(
@@ -559,6 +579,9 @@ class SessionCookieSentinel {
     }
 
     final after = await _writer.countCookiesByName(url, name);
+    // D3: 把删除+重写后的最新计数写回缓存，供同一批里后续 name 的 sweep 参考；
+    // 若该 name 之后又被重新 sweep，读到的就是这个已收敛的值。
+    stats.rememberVariantCount(name, after);
     if (after <= 1 || await _residualIsAcceptable(url, name, 1)) {
       _markSweepSuccess(name);
 
@@ -656,12 +679,18 @@ class SessionCookieSentinel {
       debugPrint('[Sentinel] _executeDelete jar lookup failed: $e');
     }
 
-    return _writer.nukeAllVariants(
+    final deleted = await _writer.nukeAllVariants(
       url: url,
       name: name,
       domainCandidates: domainCandidates.toList(growable: false),
       pathCandidates: pathCandidates.toList(growable: false),
     );
+    // D3: 删除改变了 WV cookie 集合 → 变体计数缓存作废，避免后续 sweep
+    // 用陈旧计数做决策（宁可多读一次，也不能误判变体数）。
+    if (deleted > 0) {
+      WebViewBridgeDiagnostics.instance.invalidateVariantCounts();
+    }
+    return deleted;
   }
 
   /// 从 host 提取 registrable domain（简化版：取最后两段）。

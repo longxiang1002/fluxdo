@@ -183,6 +183,7 @@ class _Ios14NetworkDiagnosticsPageState
       'cookieSweepsSkipped': s.cookieSweepsSkipped,
       'cookieBatchCountCalls': s.cookieBatchCountCalls,
       'cookieBatchCountNames': s.cookieBatchCountNames,
+      'variantCountCacheHits': s.variantCountCacheHits,
       'imageRoutedNative': s.imageRoutedNative,
     };
   }
@@ -291,6 +292,10 @@ class _Ios14NetworkDiagnosticsPageState
             '批量取数：${_bridge.cookieBatchCountCalls} 次调用'
             '覆盖 ${_bridge.cookieBatchCountNames} 个 cookie 名'
             '（预计省 ${_bridge.cookieBatchCountNames - _bridge.cookieBatchCountCalls} 次原生枚举）',
+          ),
+          Text(
+            '变体计数缓存复用：${_bridge.variantCountCacheHits} 次'
+            '（D3：同一批 sweep 内复用刚读到的计数，省掉重复的全量枚举）',
           ),
           const Text(
             '说明：边界同步（sweepAll）会对每个 cookie 名做多次原生 cookie 库往返，'

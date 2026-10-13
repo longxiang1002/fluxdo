@@ -86,11 +86,45 @@ class WebViewBridgeDiagnostics {
   /// 由 [WebViewCookiePriming] / [SessionCookieSentinel] 在完成 WV 侧写入后调用。
   void markWvCookieMutated() {
     cookieBoundarySynced = false;
+    // D3: WV 侧写入会改变 cookie 集合，变体计数缓存必须一并作废。
+    invalidateVariantCounts();
   }
+
+  /// D3: 变体计数缓存（name → 最近一次已知变体数）。
+  ///
+  /// 动机（活跃刷帖发热）：`sweepAll` 对「jar 适用 cookie ∪ WV 已有 cookie」
+  /// 的每个 name 都要先读一次变体数（iOS 原生 = 一次
+  /// `WKHTTPCookieStore.getAllCookies` 全量枚举 + 跨语言序列化），随后
+  /// `_sweepInternal` 又对同一 name 读一次。同一批 name 在一次边界同步里
+  /// 被枚举两遍，纯属重复劳动。
+  ///
+  /// 这里把「已读到的变体数」按 name 记住，供同一批 sweep 复用；任何
+  /// **改变 WV cookie 集合** 的操作（写入 / 删除 / 新 WebView 会话）都必须
+  /// 调 [invalidateVariantCounts] 作废，否则会用陈旧计数做决策。
+  /// 只缓存整数，不缓存 cookie 值，无账户内容。
+  final Map<String, int> _variantCounts = {};
+
+  /// D3: 读取缓存的变体数；未缓存返回 null（调用方按原逻辑走原生读取）。
+  int? cachedVariantCount(String name) => _variantCounts[name];
+
+  /// D3: 记住某 name 的最新变体数。
+  void rememberVariantCount(String name, int count) {
+    _variantCounts[name] = count;
+  }
+
+  /// D3: 作废变体计数缓存（WV cookie 集合可能已变化时调用）。
+  void invalidateVariantCounts() {
+    _variantCounts.clear();
+  }
+
+  /// D3: 因复用缓存计数而省下的原生 `getAllCookies` 全量枚举次数。
+  int variantCountCacheHits = 0;
 
   /// D2: 新的 WebView 会话建立/销毁时复位（新存储 = 需重新同步）。
   void resetCookieBoundarySync() {
     cookieBoundarySynced = false;
+    // D3: 新会话 = 全新 cookie 存储，缓存计数一律作废。
+    invalidateVariantCounts();
   }
 
   int get totalRequests =>
@@ -119,5 +153,7 @@ class WebViewBridgeDiagnostics {
     cookieBatchCountCalls = 0;
     cookieBatchCountNames = 0;
     imageRoutedNative = 0;
+    variantCountCacheHits = 0;
+    _variantCounts.clear();
   }
 }
