@@ -18,6 +18,12 @@ typedef OnTimingsSent =
 class ScreenTrack {
   static const _flushInterval = Duration(seconds: 60);
   static const _tickInterval = Duration(seconds: 1);
+
+  /// 挂起后的巡检节拍:1Hz 的不累积 tick 换成低频探活。闲置恢复由
+  /// [scrolled]/[setHasFocus] 的显式唤醒负责,本巡检只兜「滚动信号丢失
+  /// 但仍应计时」的边缘场景,因而给到 5s —— 相对 1Hz 是 5× 的唤醒削减,
+  /// 而一旦发现不再闲置会立刻自愈回 1Hz。
+  static const _idleProbeInterval = Duration(seconds: 5);
   static const _ajaxFailureDelays = [
     Duration(seconds: 5),
     Duration(seconds: 10),
@@ -33,6 +39,10 @@ class ScreenTrack {
 
   int? _topicId;
   Timer? _tickTimer;
+
+  /// 闲置降频态:为 true 时 [_tickTimer] 挂的是 [_idleProbeInterval]
+  /// 巡检而非 1Hz 节拍。见 [_suspendTicker]/[_wakeTicker]。
+  bool _idleSuspended = false;
   DateTime? _lastTick;
   DateTime? _lastScrolled;
   Duration _lastFlush = Duration.zero;
@@ -80,7 +90,8 @@ class ScreenTrack {
     // CF 完成后从下一个 tick 起从 0 重新累积。
     _cfFrozen = _cfService.isVerifying;
     _cfService.inProgressNotifier.addListener(_onCfChange);
-    _tickTimer ??= Timer.periodic(_tickInterval, (_) => _tick());
+    _idleSuspended = false;
+    _ensureTicker();
   }
 
   void stop() {
@@ -143,6 +154,8 @@ class ScreenTrack {
       _lastTick = now;
     }
     _lastScrolled = now;
+    // 用户重新滚动 = 采集应立即恢复满速,不等巡检节拍。
+    _wakeTicker();
   }
 
   void setHasFocus(bool hasFocus) {
@@ -150,6 +163,8 @@ class ScreenTrack {
     _hasFocus = hasFocus;
     _lastTick = DateTime.now();
     _lastFlush = Duration.zero;
+    // 回到前台后可能马上又有浏览,提前恢复满速节拍,避免首秒漏计。
+    if (hasFocus) _wakeTicker();
   }
 
   void _reset() {
@@ -157,6 +172,7 @@ class ScreenTrack {
     _lastTick = now;
     _lastScrolled = now;
     _lastFlush = Duration.zero;
+    _idleSuspended = false;
     _timings.clear();
     _totalTimings.clear();
     _consolidatedTimings.clear();
@@ -169,12 +185,48 @@ class ScreenTrack {
     _blockSendingUntil = null;
   }
 
+  /// 启动 1Hz 追踪节拍(幂等)。[start] 与闲置唤醒共用。
+  void _ensureTicker() {
+    _tickTimer ??= Timer.periodic(_tickInterval, (_) => _tick());
+  }
+
+  /// 闲置时把节拍降频为 [_idleProbeInterval] 巡检,不再 1Hz 空转。
+  ///
+  /// 首次进入闲置或本就挂着巡检时不做任何事(幂等),只有从 1Hz 降下来
+  /// 时才真正重建 Timer。
+  void _suspendTicker() {
+    if (_idleSuspended) return;
+    _idleSuspended = true;
+    _tickTimer?.cancel();
+    _tickTimer = Timer.periodic(_idleProbeInterval, (_) => _tick());
+  }
+
+  /// 由 [scrolled]/[setHasFocus] 等显式唤醒:从巡检恢复 1Hz 节拍。
+  ///
+  /// 只保证「不再是挂起态」;真正是否计时由下一次 [_tick] 的闲置判定决定。
+  void _wakeTicker() {
+    if (!_idleSuspended) return;
+    _idleSuspended = false;
+    _tickTimer?.cancel();
+    _tickTimer = Timer.periodic(_tickInterval, (_) => _tick());
+  }
+
   void _tick() {
     final now = DateTime.now();
     final lastTick = _lastTick ?? now;
     _lastTick = now; // 闲置或过盾暂停也推进基准，不累计暂停空档。
     if (_cfFrozen) return;
-    if (ScreenTrackTiming.isIdle(now, _lastScrolled ?? now)) return;
+    if (ScreenTrackTiming.isIdle(now, _lastScrolled ?? now)) {
+      // 闲置(>3min 无滚动):挂起 1Hz 节拍,消除「停在某贴不动」时的
+      // 空转唤醒。此前 _tick 每秒无条件跑一趟 DateTime.now() + 若干
+      // Map 遍历,翻页间停住看帖时也在烧电 —— iOS 上直接计入发热。
+      // 这里只停自己的本地 Timer,不触碰 WebView、不调用任何 pause
+      // API,不会阻塞任何 JS 执行(与历史"滚动挂起→验证页白屏"无关)。
+      // 恢复由 scrolled()/setHasFocus() 显式触发,见 [_wakeTicker]。
+      _suspendTicker();
+      return;
+    }
+    _ensureTicker();
 
     final diffDuration = ScreenTrackTiming.elapsed(
       now: now,
