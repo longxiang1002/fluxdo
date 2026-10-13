@@ -103,6 +103,16 @@ class CfClearanceRefreshService {
   static const Duration _iosIdleDisposeDelay = Duration(minutes: 5);
   static const Duration _minTtlBeforeIdleDispose = Duration(minutes: 2);
 
+  /// 是否刚因 iOS 前台闲置而销毁(仅 iOS)。
+  ///
+  /// 为 true 时 [_disposeWebViewImpl] 尾部**不**自动重建:闲置销毁的目的
+  /// 就是让常驻 Turnstile 的 JS 真正停烧,销毁后立即原地重建等于没省。
+  /// 休眠期间由真实需求路径唤醒并清除本标记:下个请求撞盾
+  /// ([updateSitekey])、前台恢复([resume])、显式 [start]。
+  /// 注意不能用 `_shouldBeRunning=false` 表达这个状态:撞盾的
+  /// [updateSitekey] 分支依赖 `_shouldBeRunning==true` 才会重建。
+  bool _idleDisposed = false;
+
   /// 是否走「择时销毁」而不是「保留实例」的省电路径(仅 iOS)。
   bool get _shouldDisposeOnBackground => io.Platform.isIOS;
 
@@ -127,7 +137,13 @@ class CfClearanceRefreshService {
       CfChallengeLogger.log(
         '[CfRefresh] sitekey 已更新: ${sitekey.substring(0, 8)}...',
       );
-      if (_shouldBeRunning && !_isRunning && !_isDisposing) {
+      if (_isDisposing) {
+        // 撞盾/预加载需求到达:撤销闲置休眠标记,让正在进行的 dispose
+        // 尾部兜底重建,避免 WebView 永久休眠(见 [_idleDisposed])。
+        _idleDisposed = false;
+        return;
+      }
+      if (_shouldBeRunning && !_isRunning) {
         _startWebView();
       }
     }
@@ -176,6 +192,10 @@ class CfClearanceRefreshService {
     _cancelDelayedTimers();
 
     if (_isDisposing) {
+      // 有真实需求到达(撞盾/显式唤醒),撤销闲置休眠标记:让正在进行的
+      // dispose 尾部回退到「期望态重建」分支兜底拉起,而不是永久休眠
+      // (见 [_idleDisposed])。
+      _idleDisposed = false;
       CfChallengeLogger.log('[CfRefresh] start 已排队，等待当前 WebView 完成销毁');
       return;
     }
@@ -236,6 +256,9 @@ class CfClearanceRefreshService {
 
     CfChallengeLogger.log('[CfRefresh] 恢复');
     if (_isDisposing) {
+      // 同 start:前台恢复是真实需求,撤销闲置休眠标记让 dispose 尾部
+      // 兜底重建(见 [_idleDisposed])。
+      _idleDisposed = false;
       CfChallengeLogger.log('[CfRefresh] resume 已排队，等待当前 WebView 完成销毁');
       return;
     }
@@ -281,6 +304,11 @@ class CfClearanceRefreshService {
     if (_isRunning || _isDisposing || !_shouldBeRunning || !_isForeground) {
       return;
     }
+
+    // 走到这里说明是真实需求触发(撞盾/前台恢复/显式 start),退出 iOS
+    // 闲置休眠态:清标记后本次创建即为「按需重建」,后续 dispose 尾部
+    // 恢复默认的期望态重建语义(见 [_idleDisposed])。
+    _idleDisposed = false;
 
     final sitekey = _sitekey;
     if (sitekey == null || sitekey.isEmpty) {
@@ -625,9 +653,14 @@ document.close();
       '[CfRefresh] disposing end: reason=$reason, shouldRun=$_shouldBeRunning',
     );
 
-    if (_shouldBeRunning && !_isRunning && _isForeground) {
+    if (_shouldBeRunning && !_isRunning && _isForeground && !_idleDisposed) {
       CfChallengeLogger.log('[CfRefresh] dispose 后按期望状态重启 WebView');
       _startWebView();
+    } else if (_idleDisposed) {
+      CfChallengeLogger.log(
+        '[CfRefresh] 闲置销毁完成，保持休眠待按需重建 '
+        '(撞盾/前台恢复/显式 start)',
+      );
     }
   }
 
@@ -985,6 +1018,9 @@ document.close();
         }
       }
       CfChallengeLogger.log('[CfRefresh] iOS 前台闲置超时，销毁常驻 WebView 省电');
+      // 置休眠标记,让 dispose 尾部不自动重建(见 [_idleDisposed])。这是
+      // 本路径与 stop 以外其它 dispose 的关键区别:只有真省电才不重建。
+      _idleDisposed = true;
       _generation++;
       unawaited(_disposeWebView(reason: 'ios_idle_dispose'));
     });
