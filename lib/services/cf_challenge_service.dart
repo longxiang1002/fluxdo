@@ -820,7 +820,8 @@ class CfChallengePage extends StatefulWidget {
   State<CfChallengePage> createState() => _CfChallengePageState();
 }
 
-class _CfChallengePageState extends State<CfChallengePage> {
+class _CfChallengePageState extends State<CfChallengePage>
+    with WidgetsBindingObserver {
   InAppWebViewController? _controller;
   final _webViewKey = GlobalKey();
   bool _isLoading = true;
@@ -843,8 +844,19 @@ class _CfChallengePageState extends State<CfChallengePage> {
   Timer? _noChallengeCheckTimer;
   Timer? _loadStopFallbackTimer;
   Timer? _pageReadyFallbackTimer;
+
+  /// 当前 App 生命周期状态，用于决定 [_timeoutTimer] 的节拍（见 [_timeoutTickInterval]）。
+  AppLifecycleState? _appLifecycleState;
   static const _backgroundMaxCheckCount = 10;
   static const _foregroundMaxCheckCount = 60;
+
+  /// 非前台（后台/未激活）时兜底轮询的节拍。
+  ///
+  /// 前台保持 1Hz：[_checkCount] 的语义是「秒」，超时阈值也按秒计。
+  /// 后台降到 3s：验证页挂在后台时用户看不到计数，唯一还在跑的
+  /// 实质工作是 [_pollCfClearance] 里的一趟平台主线程 cookie IPC，
+  /// 降频可直接减少后台 CPU 唤醒（iOS 上计入发热）。
+  static const _backgroundTickInterval = Duration(seconds: 3);
   static const _noChallengeCheckDelay = Duration(milliseconds: 1200);
   static const _revealStateWatchInterval = Duration(milliseconds: 150);
   static const _loadStopFallbackDelay = Duration(milliseconds: 1200);
@@ -864,7 +876,17 @@ class _CfChallengePageState extends State<CfChallengePage> {
     super.initState();
     _isBackground = widget.startInBackground;
     _needsManualAttention = false;
+    // 后台降频：本页是验证遮罩，用户很可能在它挂着时切走（等短信/去看帖子）。
+    // 不监听生命周期的话，1Hz 兜底 Timer 会在后台继续跑（见 [_onAppLifecycleChanged]）。
+    WidgetsBinding.instance.addObserver(this);
+    _appLifecycleState = WidgetsBinding.instance.lifecycleState;
     _snapshotInitialClearance();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    _onAppLifecycleChanged(state);
   }
 
   /// 记录验证开始时的旧 cf_clearance 值
@@ -900,6 +922,7 @@ class _CfChallengePageState extends State<CfChallengePage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _timeoutTimer?.cancel();
     _noChallengeCheckTimer?.cancel();
     _loadStopFallbackTimer?.cancel();
@@ -1280,47 +1303,80 @@ class _CfChallengePageState extends State<CfChallengePage> {
   // 超时计时器（兜底机制）
   // ---------------------------------------------------------------------------
 
+  /// App 生命周期跟踪：切到后台时把兜底轮询降频。
+  ///
+  /// 只影响本页自己的 Dart Timer 节拍，**不触碰 WebView**
+  /// （不调 pauseTimers/resumeTimers、不挂起 JS），因此与「验证页白屏」
+  /// 那条已被废弃的路线无关：CF 的 JS 仍照常运行，验证通过后由
+  /// onChallengeComplete / cookie 同步路径正常收尾。
+  void _onAppLifecycleChanged(AppLifecycleState state) {
+    if (_appLifecycleState == state) return;
+    _appLifecycleState = state;
+    if (_hasPopped || !mounted) return;
+    _restartTimeoutTicker();
+  }
+
+  /// 当前应有的兜底节拍：前台 1Hz；后台/未激活降为 [_backgroundTickInterval]。
+  Duration get _timeoutTickInterval =>
+      _appLifecycleState == AppLifecycleState.resumed
+      ? const Duration(seconds: 1)
+      : _backgroundTickInterval;
+
+  /// 用当前应有的节拍重建 [_timeoutTimer]（幂等：没在计时则不做任何事）。
+  ///
+  /// 验证本身有 8s~60s 的上界，切后台往往只跨越几个节拍，
+  /// 3s 粒度带来的超时判定误差（≤ 2s）可忽略；换来的是一次
+  /// 平台主线程 cookie IPC 从每秒 1 次降到每 3 秒 1 次。
+  void _restartTimeoutTicker() {
+    if (_timeoutTimer == null) return;
+    _timeoutTimer!.cancel();
+    _timeoutTimer = Timer.periodic(_timeoutTickInterval, _onTimeoutTick);
+  }
+
   void _startTimeout() {
     _timeoutTimer?.cancel();
     _checkCount = 0;
     _hasTimedOut = false;
-    _timeoutTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (!mounted || _finishingFromVerifyResponse) {
-        timer.cancel();
+    _timeoutTimer = Timer.periodic(_timeoutTickInterval, _onTimeoutTick);
+  }
+
+  void _onTimeoutTick(Timer timer) {
+    if (!mounted || _finishingFromVerifyResponse) {
+      timer.cancel();
+      return;
+    }
+    _checkCount++;
+    if (!_isBackground && !_hasTimedOut) setState(() {}); // 更新计数显示
+
+    // 兜底轮询：验证通过后页面重定向会销毁 JS 上下文，
+    // 导致 onChallengeComplete 回调丢失（macOS 上尤为明显），
+    // 主动检查 cf_clearance 变化来弥补。
+    // 前台 1Hz；后台降为 [_backgroundTickInterval]（见 [_timeoutTickInterval]）。
+    _pollCfClearance();
+
+    if (_checkCount > _activeMaxCheckCount) {
+      if (_isBackground) {
+        CfChallengeLogger.log(
+          '[VERIFY] Background timeout after $_activeMaxCheckCount seconds, prompting manual verify',
+        );
+        _promoteToForeground(dueToTimeout: true);
         return;
       }
-      _checkCount++;
-      if (!_isBackground && !_hasTimedOut) setState(() {}); // 更新计数显示
-
-      // 兜底轮询：验证通过后页面重定向会销毁 JS 上下文，
-      // 导致 onChallengeComplete 回调丢失（macOS 上尤为明显），
-      // 每秒主动检查 cf_clearance 变化来弥补
-      _pollCfClearance();
-
-      if (_checkCount > _activeMaxCheckCount) {
-        if (_isBackground) {
-          CfChallengeLogger.log(
-            '[VERIFY] Background timeout after $_activeMaxCheckCount seconds, prompting manual verify',
-          );
-          _promoteToForeground(dueToTimeout: true);
-          return;
+      if (!_hasTimedOut) {
+        CfChallengeLogger.logVerifyResult(
+          success: false,
+          reason: 'timeout after $_activeMaxCheckCount seconds',
+        );
+        if (mounted) {
+          setState(() {
+            _hasTimedOut = true;
+            _needsManualAttention = true;
+          });
+          _showInfo(S.current.cf_verifyTimeout);
         }
-        if (!_hasTimedOut) {
-          CfChallengeLogger.logVerifyResult(
-            success: false,
-            reason: 'timeout after $_activeMaxCheckCount seconds',
-          );
-          if (mounted) {
-            setState(() {
-              _hasTimedOut = true;
-              _needsManualAttention = true;
-            });
-            _showInfo(S.current.cf_verifyTimeout);
-          }
-        }
-        return;
       }
-    });
+      return;
+    }
   }
 
   /// 延迟检测页面是否存在 CF 验证盾
