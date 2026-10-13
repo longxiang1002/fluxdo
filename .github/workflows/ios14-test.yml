@@ -66,6 +66,10 @@ jobs:
           mkdir -p dist
           dart tool/project_prep.dart app
           { git rev-parse HEAD; git submodule status; flutter --version; dart --version; rustc --version; xcodebuild -version; } > dist/build-info.txt 2>&1
+          # 把「本次上传的 app 版本后缀」写进 build-info，让版本号从"日志里的一句话"
+          # 变成可核对的事实。此前 suffix 被 GitHub 表达式替换吞掉、静默退回默认值，
+          # 只靠人肉读日志根本发现不了（run41/42/43 连续三轮后缀卡死在 008）。
+          echo "APP_VERSION_SUFFIX=${APP_VERSION_SUFFIX}" >> dist/build-info.txt
       - name: 格式与静态分析
         shell: bash
         run: |
@@ -110,7 +114,16 @@ jobs:
           # pubspec 保持 0.2.28，这里在打包前改写 Runner.app 内 Info.plist 的
           # CFBundleShortVersionString。CFBundleVersion（内部版本号）保持
           # 递增（--build-number 由当前时间生成），TrollStore 覆盖安装不受影响。
-          APP_VERSION_SUFFIX="${APP_VERSION_SUFFIX:-008}"
+          #
+          # ⚠️ 这里**绝不能**写成 APP_VERSION_SUFFIX="\${APP_VERSION_SUFFIX:-008}"。
+          # GitHub 对 run 块整体做表达式替换，替换时会顺手吃掉同类脚本里未被
+          # 保护的花括号变量引用：变量名连同花括号一起被匹配掉，带 :- 默认值的
+          # 写法会退化成纯文本，于是静默取默认值。run41/42/43 的版本后缀连续
+          # 三轮卡死在 0.2.28.008 就是这个原因（同一个 run 块里的 SHORT、APP_PLIST
+          # 之类也被吃成空串，只是恰好都有别处兜底才没暴露）。
+          # 兜底策略：直接写死字面量，不再依赖 :- 默认值语法。每轮发版把这里 +1，
+          # 并同步核对 build-info.txt 的 APP_VERSION_SUFFIX 行与 ipa-inspection.json。
+          APP_VERSION_SUFFIX="009"
           APP_PLIST="$RUNNER_TEMP/ios14-package/Payload/Runner.app/Info.plist"
           BASE_VER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PLIST")
           NEW_VER="${BASE_VER}.${APP_VERSION_SUFFIX}"
@@ -144,6 +157,10 @@ jobs:
         run: |
           set -euo pipefail
           SHORT=$(echo "${{ github.sha }}" | cut -c1-8)
+          # ⚠️ 本行**必须**保持「前缀 + 花括号变量 + 后缀」三段式，且该变量不能
+          # 挪进任何带双花括号表达式的引号字符串里（见上方 APP_VERSION_SUFFIX 处的说明）。
+          # 曾经它和 suffix 同处一个 run 块，导致两者一起被吞；如今 suffix 已改为
+          # 纯字面量，这里也保持现状，避免回归。
           NEWNAME="fluxdo-ios14-test-${{ github.run_number }}-${SHORT}.ipa"
           cp "dist/fluxdo-ios14-test-unsigned.ipa" "dist/${NEWNAME}"
           rm -f "dist/fluxdo-ios14-test-unsigned.ipa"
