@@ -409,7 +409,6 @@ class SessionCookieSentinel {
         variantsBefore = await _writer.countCookiesByName(url, name);
       }
     }
-
     if (intent == SweepIntent.delete) {
       return await _sweepDelete(
         url: url,
