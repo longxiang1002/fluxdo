@@ -753,3 +753,143 @@ VPN App 能改）。因此「把 `127.0.0.1:<port>` 塞进系统代理让 WKWebV
 4. **需老板拍板**：若坚持「进程内接管」，唯一路线是自写
    `WKURLSchemeHandler` 把 `https://` 整页代发（成本高、易破坏登录态）
    或换支持 iOS14 的 webview fork。建议先不做，优先用系统代理保证出口一致。
+
+---
+
+## 2026-10-13 08:00 CST | 路径B 落地：上游连接池共享 —— 并解决「子模块无 push 权限」的绕行
+
+### 0. CI 前置核对（强制第 0 步）
+- **#37** `c543ea15`(id `38313693826`) = ✅ **success**；
+  #36/#35 failure 的根因（format/analyze）**均已修复**。
+- GitHub Release **`ios14-test-37`** 已生成，含 IPA + SHA256SUMS + build-info + validation + inspection。
+- → **无未修复 failure、无需补建 Release**，本轮可直接推进。
+
+### 1. 本轮关键发现（此前 06:00 轮改动其实没进 CI）
+- `core/doh_proxy` 是 **submodule** → `Lingyan000/fluxdo_doh`（`.gitmodules:1-3`）；
+  CI `submodules: recursive`（workflow:24）检出**固定 commit** `08d3468f`。
+- `GET /repos/Lingyan000/fluxdo_doh` → **`permissions.push = false`**：
+  本 agent **无法推送子模块**。→ 06:00 轮准备的
+  `0001-gateway-share-upstream-h2-pool.patch` 一直只躺在本地，**从未被编译**。
+- 结论：Rust 改动只能走 **「patch vendor 进主仓库 + CI checkout 后 `git apply`」**。
+
+### 2. 本轮改动（commit `9f8715ed`）
+- **新增 `patches/0001-gateway-share-upstream-h2-pool.patch`**（纳入主仓库）：
+  - `handle_gateway_connection()`：每连接新建池 → 进程级
+    `gateway_shared_pool()`（`OnceLock<GatewayPool>`），跨连接/跨导航复用上游 H2。
+  - 客户端侧 `hyper_http1::Builder`（硬编码 H1、单连接单在途）
+    → `hyper_util::...::auto::Builder`（h1/h2 自适应）。
+  - `stop()` 调 `reset_gateway_shared_pool()`；新增 `gateway_pool_evict()`
+    （`is_ready()` 剔除 + `MAX_POOLED_HOSTS=32`），防共享池泄漏。
+  - 移除失效的 `hyper_http1` import（否则 unused import 报错）。
+  - `mitm_serve()` 单 host 池保持不变（作用域限定单 host，改全局会串目标）。
+- **workflow 新增步骤「应用已 vendor 的 Rust 网关补丁」**：checkout 后、
+  toolchain 前，对 `patches/*.patch` 逐个 `cd core/doh_proxy && git apply`；
+  已应用则跳过（`--reverse --check` 幂等），失败显式报错。
+  `APP_VERSION_SUFFIX` `003 → 004`。
+
+### 3. 本地验证（无法编译 Rust，做力所能及的静态核对）
+- 用 pin 住的 `08d3468f` 真身 clone 到 `/tmp/patchtest` 模拟 CI：
+  `git apply` → **Applied patch src/proxy.rs cleanly**；
+  再 `--reverse --check` → 通过（证明 CI 幂等跳过逻辑成立）。
+- `Cargo.toml:46-47`：`hyper`/`hyper-util` 均 `features=["full"]` → auto builder 可用。
+- `src/proxy.rs:31` 已 `use tracing::{debug,...}` → patch 新增 `debug!` 可解析。
+- 改动前 `hyper_http1` 仅 2 处（import + 单次 use），patch 成对删除，无残留引用。
+- `dart format` CI 同款预检：37 文件 **0 changed**，exit 0。workflow YAML 解析正常，
+  新步骤位于 index 1（checkout 之后）。
+
+### 4. 本轮 CI
+- `9f8715ed` → run **38**（id `38325370819`，08:04 CST 触发，in_progress）。
+- 若 Rust 编译通过 + 出包 → Release `ios14-test-38`。
+
+### 5. 意外损失（如实记录）
+- 本轮开工时工作区有一份 **06:00 轮遗留的未提交 WIP**：
+  `system_proxy_service.dart` 自适应退避（30s 快节拍、无变化翻倍、封顶 5min、有变化复位）。
+  我在 `git checkout --` 时**误把它一并丢弃**（该 WIP 从未 commit，无法从 git 恢复）。
+- 已按当时 diff **逐字重建为 `patches/WIP-0002-system-proxy-adaptive-backoff.txt`**
+  （`.txt` 后缀，不会被 CI 的 `*.patch` 误应用），留待后续轮次正式落地。
+- 教训：清理工作区前先确认哪些改动是「本轮不要提交」而非「可以删除」，
+  应改用 `git stash` 而非 `git checkout --`。
+
+### 6. 下一步
+1. 核对 run #38：重点看新步骤「应用已 vendor 的 Rust 网关补丁」是否成功、
+   Rust 编译是否通过、是否出 Release `ios14-test-38`。
+2. 后续轮次：把 `WIP-0002` 的自适应退避正式实现为 Dart 改动 + 补单测。
+3. 老板实机验证：DoH 模式下发热是否下降（对比 0.2.28.004 与 0.2.28.003）。
+
+---
+
+## 2026-10-13 10:00 CST | 路径A 发热源定位 —— 阅读追踪 1Hz 空转唤醒降频
+
+### 0. CI 前置核对（强制第 0 步）
+- **#38** `9f8715ed`(id `38325370819`) = ✅ **success**（08:04 CST 触发）。
+  - job 步骤 #3「应用已 vendor 的 Rust 网关补丁」= **success** →
+    子模块无 push 权限的「patch vendor + CI `git apply`」方案**已被真正编译验证**。
+  - 全部 15 步 success，含构建 IPA / 发布 Release。
+- Release **`ios14-test-38`** 已生成：
+  `fluxdo-ios14-test-38-9f8715ed.ipa`(54,869,766B) + SHA256SUMS + build-info
+  + validation + inspection。
+- → 无未修复 failure、无需补建 Release，本轮直接推进新改动。
+
+### 1. 本轮排查（先证据，逐条核对常驻 timer）
+| 文件 | 周期 | 结论 |
+|---|---|---|
+| `cf_clearance_refresh_service.dart` | cookie 2min / health 1min / iOS 闲置销毁 5min / 滚动挂起仅 Android | 已优化，不动 |
+| `system_proxy_service.dart` | 30s 平台 IPC 兜底 + pause/resume | 已优化，不动 |
+| `frame_jank_monitor.dart` | 50ms/500ms | 仅监控运行时活跃；release 默认关；`showPersistentPill=false` |
+| **`screen_track.dart`** | **1Hz 常驻** | **问题所在（见下）** |
+
+**`screen_track.dart` 的缺陷（本轮定位）**：
+- `Timer.periodic(_tickInterval=1s)` 从 `start(topicId)` 起**一直跑**，
+  直到 `stop()`/`abandon()`；
+- `_tick()` **命中闲置时不早退**——`isIdle` 只让 `elapsed()` 返回零，
+  但之前的 `DateTime.now()`、`_lastFlush += diffDuration`、`rush` 的 Map 遍历
+  每秒照跑；
+- `setHasFocus(false)`（切后台）只 skip 累加段，**不取消 Timer**。
+
+→ 结果：**翻页间停下看帖 / 切到后台 / iOS 弹出系统确认框**时，
+每分钟 60 次无谓唤醒 + 微任务，iOS 上直接计入发热。
+对照组：同类的 `frame_jank_monitor` 探针都知道「监控关了就不跑」，
+唯独阅读追踪**从未降频**。
+
+### 2. 本轮改动（commit `eb635ba4`）
+`lib/services/screen_track.dart`（+/- 见 git）：
+- 新增字段 `bool _idleSuspended`、常量 `_idleProbeInterval = Duration(seconds: 5)`。
+- `_tick()`：命中 `ScreenTrackTiming.isIdle`（>3min 无滚动）→ `_suspendTicker()`，
+  把 1Hz 节拍**降为 5s 巡检**（**唤醒 -80%**）。
+- 新增 `_suspendTicker()` / `_wakeTicker()` / `_ensureTicker()`，均幂等。
+- `scrolled()` 与 `setHasFocus(true)` 显式 `_wakeTicker()` → 用户一动**立即回满速**，
+  **零计时精度损失**（恢复点即计时起点，无补算需求）。
+- `_reset()` 复位 `_idleSuspended`；`start()` 用 `_ensureTicker()` 收口。
+
+### 3. 硬性禁令遵守（逐条核对）
+- 未触碰 WebView；未调用 `pauseTimers`/`resumeTimers`；未引任何滚动挂起逻辑。
+  仅停/建**本对象自己的 Dart `Timer`**，不影响任何 JS 执行 → 与「验证页白屏」无关。
+- `_updateScrollPause()` 仍只在 `io.Platform.isAndroid` 生效（已复核 `:732` 早退），
+  iOS 路径零改动。
+- 未改 CONNECT 语义、未改 Rust 网关。
+
+### 4. 本地验证
+- CI 同款 `dart format --output=none --set-exit-if-changed`：**1 file, 0 changed**, exit 0。
+- `dart analyze --fatal-infos`：**项目级分析器在本容器崩溃**
+  （`Bad state: The analysis server crashed unexpectedly`）——既有环境限制，
+  非本轮引入。改用「隔离桩 + 单文件」分析：剩余报错**全是桩缺失**
+  （缺 flutter package / 路径桩），grep 新增符号
+  `idleSuspended|suspendTicker|ensureTicker|wakeTicker|idleProbeInterval` → **0 报错**。
+
+### 5. 本轮 CI
+- 触发 run **#39**（`eb635ba4` + `5bb5f1a0`，`APP_VERSION_SUFFIX` `004 → 005`）。
+- 待核对：格式/分析 → iOS14 回归 → 构建 → Release `ios14-test-39`。
+
+### 6. 本轮顺带发现（**未改，留给后续轮**）
+- `core/doh_proxy/src/dns.rs:1253` `http2_keep_alive_while_idle(true)` +
+  `:1254` `http2_keep_alive_timeout(10s)`：DNS 解析用的 H2 通道在**空闲时仍每 30s
+  发 keep-alive PING**。DNS 查询是低频事件，这个空闲心跳可能让 DoH 连接永不回收、
+  持续小功耗。**本轮不顺手改**：Dart 改动与 Rust 改动若混进同一个二进制，
+  老板实机测出发热变化将**无法归因**是哪一个起效。留作下一轮单独立项的候选。
+- 教训延续：同一轮只动「一类改动」，保证变量可归因。
+
+### 7. 下一步（下一轮候选）
+1. 核对 run #39 出包 + Release `ios14-test-39`。
+2. 若 #39 绿：立项「DNS H2 keep-alive 空闲心跳」单独一轮（Rust patch，可归因）。
+3. 继续扫 `cf_challenge_service.dart:1287` 的 1s 超时轮询
+   （`_pollCfClearance()` 每秒一趟）——验证期外是否也可能常驻。

@@ -3,7 +3,59 @@
 > 分支 `fix/ios14-network-thermal`。每轮必须动手改代码，写完记 CI 结果。
 > **2026-10-13 起主攻**：DoH 模式下 App 仍旧发热。
 
-## 🎯 本轮（2026-10-13 08:00 CST）— 路径 B 落地：上游连接池共享（含子模块无法直推的绕行方案）
+
+## 🎯 本轮（2026-10-13 10:00 CST）— 路径A 发热源定位：阅读追踪 1Hz 空转唤醒
+
+### CI 前置核对（强制第 0 步）
+- **#38** `9f8715ed`(id `38325370819`) = ✅ **success**（10-13 08:04 CST 触发）。
+- job 步骤逐条 success，含 **#3「应用已 vendor 的 Rust 网关补丁」= success**（证明
+  submodule 无 push 权限的「patch vendor + CI git apply」绕行方案**已被 CI 真正编译**）。
+- GitHub Release **`ios14-test-38`** 已生成：`fluxdo-ios14-test-38-9f8715ed.ipa`(54,869,766B)
+  + SHA256SUMS + build-info + validation + inspection。
+- → **无未修复 failure、无需补建 Release**，本轮可推进。
+
+### 本轮证据（先量后改）
+逐条核查 DoH 模式下的常驻 Timer.periodic：
+- `cf_clearance_refresh_service.dart`：cookie 轮询 **2min**、health **1min**、iOS 闲置销毁
+  **5min**、滚动挂起仅 Android — 已优化过，本轮不动。
+- `system_proxy_service.dart`：30s 平台 IPC 兜底 — 已优化过（含 pause/resume），不动。
+- `frame_jank_monitor.dart`：50ms/500ms 探针只在**监控运行时**活跃；release 默认关
+  （`pref_perf_diagnostics` 默认 false）；`PerfOverlay.showPersistentPill=false` 已禁常驻面板。
+- **`screen_track.dart`：`Timer.periodic(1s)` 从 `start(topicId)` 起**一直跑**，
+  且 `_tick()` **闲置时不早退**：无论是否闲置都会先跑一趟 `DateTime.now()` +
+  若干 Map 遍历；`setHasFocus(false)` 只 skip 累加、**不取消 Timer**。
+  → 这是「翻页间停下看帖 / 切后台 / iOS 系统确认框」时每分钟 60 次的无谓唤醒，
+  iOS 上直接计入发热。**此前从未被降频过**。
+
+### 本轮改动（commit `eb635ba4`）
+`lib/services/screen_track.dart`：
+- 新增 `_idleSuspended` 降频态 + `_idleProbeInterval=5s`。
+- `_tick()` 命中 `ScreenTrackTiming.isIdle`（>3min 无滚动）→ 调 `_suspendTicker()`
+  把 1Hz 节拍**换成 5s 巡检**（-80% 唤醒），不再每秒空转。
+- `scrolled()` / `setHasFocus(true)` 显式 `_wakeTicker()`：用户一动立刻回满速，
+  **零计时精度损失**（恢复点本就是计时起点）。
+- `_reset()` 复位 `_idleSuspended`；`_ensureTicker()` 幂等收口 `start()`。
+- 巡检兜底：万一「滚动信号丢失但仍该计时」，5s 内必被兜回（3min 闲置阈值 ≫ 5s）。
+
+### 硬性禁令遵守
+- **不碰 WebView**、不调 `pause`/`resume`、不引任何挂起/滚动暂停逻辑；
+  只停自己的本地 Dart Timer，**不阻塞任何 JS 执行**，与「验证页白屏」路线无关。
+- 不改 CONNECT 语义、不改 Rust 网关行为（Rust 侧只顺带发现一处**未来可优化项**，
+  见 progress-log：`dns.rs:1253 http2_keep_alive_while_idle(true)` 可能影响 DNS H2 空闲功耗，
+  **本轮未改**以免与 Dart 改动混在同一个二进制里、无法归因）。
+
+### 本地验证
+- CI 同款 `dart format --set-exit-if-changed`：1 file **0 changed**，exit 0。
+- `dart analyze --fatal-infos`：项目级分析器在本环境崩溃（既有环境问题），
+  改用隔离桩验证 → **新增符号 0 报错**（grep `idleSuspended|suspendTicker|ensureTicker|
+  wakeTicker|idleProbeInterval` 无命中），剩余报错全为桩缺失。
+
+### 待验
+- [ ] push + 触发 CI run #39（`APP_VERSION_SUFFIX` `004 → 005`）
+- [ ] 核对 run #39：格式/分析 + iOS14 回归 + 出包 + Release `ios14-test-39`
+- [ ] 老板实机：DoH 模式下「停在同一贴不动 5min」的发热对比 0.2.28.004 vs .005
+
+## 📌 上一轮（2026-10-13 08:00 CST）— 路径 B 落地：上游连接池共享（含子模块无法直推的绕行方案）
 
 ### CI 前置核对（强制第 0 步）
 - 最近 run：**#37** `c543ea15`(id `38313693826`) = ✅ **success**（2026-10-12 21:56 UTC / 10-13 05:56 CST 触发）。
