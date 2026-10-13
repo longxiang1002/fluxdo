@@ -4,7 +4,61 @@
 > **2026-10-13 起主攻**：DoH 模式下 App 仍旧发热。
 
 
-## 🎯 本轮（2026-10-13 20:53 CST）— 路径A：帧监控 summary 空转钳流
+## 🎯 本轮（2026-10-13 23:00 CST）— 路径A：CF 前台闲置销毁后「真休眠」（取消 dispose 尾部原地重建）
+
+### CI 前置核对（强制第 0 步）
+- **#48** `6637ee87`(id `38407456544`) = ✅ **success**（10-13 21:44 CST 触发）。
+  Release **`ios14-test-48`** 已在：`fluxdo-ios14-test-48-6637ee87.ipa`(54,869,613B)
+  + SHA256SUMS + build-info + validation + inspection；
+  `ipa-inspection.json` → `version = 0.2.28.011`、`build = 2026101314` ✅。
+- **#47** `51a980e6` = ❌ failure，根因已定位（STEP8 analyze）：
+  `error - frame_jank_monitor.dart:707:18 - Undefined name 'budgetUs'`。
+  → **已被 #48 的 `6637ee87` 修复**（改 `_budgetUs()`），非遗留 failure。
+- `ios14-test-47` 无 Release（build 未产出），符合预期，无需补建。
+- → **无未修复 failure、无缺 Release**，本轮可推进。
+
+### 本轮证据（先量后改）
+- `cf_clearance_refresh_service.dart:1054`（改前）闲置销毁只 `_disposeWebView()`，
+  而 `_disposeWebViewImpl` 尾部（`:656`）有「期望态重建」分支
+  `_shouldBeRunning && !_isRunning && _isForeground` → **销毁后立刻原地重建**。
+  于是 iOS 前台闲置销毁在 `_shouldBeRunning==true` 时形同空转：Turnstile
+  api.js 心跳 + widget 定时器被重新拉起，省电收益归零。
+- 该销毁路径原本是「销毁换省电」（iOS 无安全实例级挂起），原地重建等于没省。
+
+### 本轮改动（commit `b82150ae`）
+`lib/services/cf_clearance_refresh_service.dart`：
+- 新增 `bool _idleDisposed` 休眠标记（`:114`），**仅** iOS 闲置销毁路径置位（`:1018`）。
+- `_disposeWebViewImpl` 尾部重建条件加 `&& !_idleDisposed`；命中休眠时改为记一条
+  「闲置销毁完成，保持休眠待按需重建」日志（`:656-663`）。
+- 三条真实需求路径到达时清标记并按需重建：`updateSitekey`（撞盾，`:143`）、
+  `start()`（`:198`）、`resume()`（前台恢复，`:261`）、`_startWebView` 入口（`:311`）。
+- **不用 `_shouldBeRunning=false` 表达休眠**：`updateSitekey` 的重建分支依赖它为 true。
+- 休眠期间 `_cancelRuntimeTimers()` 已停掉 cookie(2min)/health(1min) 轮询 → 无空转。
+- **硬性禁令遵守**：未触碰任何 WebView 挂起 API，无 `pauseTimers`/`resumeTimers`、
+  无滚动挂起逻辑，不阻塞任何 JS 执行。风险由既有 `_minTtlBeforeIdleDispose` 兜底。
+
+### 唤醒契约核对（防「睡死」）
+- 撞盾 403：interceptor 先 `extractAndUpdateSitekey` 再 `stop()`（`_shouldBeRunning=false`），
+  手动验证成功后 `cf_challenge_service.dart:764` 调 `start()` 重建 → 不冲突。
+- 前台恢复：`browser_trust_coordinator.dart:156` → `resume()` → `_startWebView()`。
+- 显式启动：`browser_trust_coordinator.dart:269` → `start()`。
+
+### 本地验证（CI 同款工具链 Dart 3.12.0）
+- `/tmp/dartsdk312/dart-sdk/bin/dart format --output=none --set-exit-if-changed`：
+  1 file **0 changed，exit 0**。
+- CI 同款 diff 预检：`git diff --name-only --diff-filter=ACMR e1bd839… HEAD -- '*.dart'`
+  → 38 files，**0 changed，exit 0**（与 CI 日志同款输出一致）。
+- Rust 侧：本地 `core/doh_proxy/src/proxy.rs` 脏状态经比对 ==
+  `patches/0001-gateway-share-upstream-h2-pool.patch`（仅差 git 头尾注释行），
+  **路径B 已交付且 CI 绿**，无未交付 Rust 改动。
+
+### 待验
+- [ ] CI run **#49**（`4ff93fd2`，`APP_VERSION_SUFFIX` `011 → 012`）
+- [ ] 核对 run #49：STEP8 + iOS14 回归 + 出包 + Release `ios14-test-49`（期望 `0.2.28.012`）
+- [ ] 老板实机：DoH 模式前台静默 5min+ 后，对比 0.2.28.011 vs .012 的发热/掉帧
+      （日志应出现「闲置销毁完成，保持休眠待按需重建」）
+
+## ✅ 上轮（2026-10-13 20:53 CST）— 路径A：帧监控 summary 空转钳流
 
 ### CI 前置核对（强制第 0 步）
 - **#46** `280547e3`(id `38387493583`) = ✅ **success**（10-13 19:02 CST 触发）。

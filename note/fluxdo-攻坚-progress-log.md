@@ -1228,3 +1228,37 @@ exit 0；`dart analyze` 项目级分析器在本容器崩溃（既有环境限�
    - 路径B：DoH 通道连接复用（rhttp/Dio 是否每请求新建连接）；
    - `cf_challenge_service.dart` `_startChallengeRevealProbe` 250ms 轮询。
 3. SS 代理接管内置浏览器（并行方向 P0：能力诊断可观测化）。
+
+---
+
+## 2026-10-13 23:00 CST | 路径A：CF 前台闲置销毁后「真休眠」（取消 dispose 尾部原地重建）
+
+**CI 前置核对**：#48 `6637ee87` = ✅ success + Release `ios14-test-48`
+（`version=0.2.28.011`、`build=2026101314`）；#47 `51a980e6` 的 failure 根因
+已定位为 STEP8 `frame_jank_monitor.dart:707:18 Undefined name 'budgetUs'`，
+且**已被 #48 修复**（`6637ee87`）→ 无未修复 failure、无缺 Release，本轮可推进。
+
+**本轮改动**：`cf_clearance_refresh_service.dart` 新增 `_idleDisposed` 休眠标记。
+iOS 前台闲置销毁路径置位；`_disposeWebViewImpl` 尾部原本无条件「期望态重建」
+（`:656`），会让闲置销毁原地重建 = 省电收益归零。现加 `&& !_idleDisposed`，
+休眠由真实需求路径（`updateSitekey` 撞盾 / `resume` 前台恢复 / `start` 显式）
+清除标记并按需重建。不用 `_shouldBeRunning=false` 表达休眠（撞盾分支依赖它为 true）。
+休眠期 `_cancelRuntimeTimers` 已停 cookie/health 轮询，无空转。
+**未触碰任何 WebView 挂起 API，无 pauseTimers/resumeTimers、无滚动挂起，不阻塞 JS。**
+
+**本地验证**：Dart 3.12.0（CI 同款）`dart format --set-exit-if-changed` → 1 file 0 changed；
+CI 同款 diff 预检（base `e1bd839…`）→ 38 files 0 changed。
+Rust 侧比对确认本地 `proxy.rs` 脏状态 == `patches/0001-*.patch`（路径B 已交付），无未交付 Rust 改动。
+
+**commit**：`b82150ae`（代码）、`4ff93fd2`（APP_VERSION_SUFFIX 011 → 012）
+
+**CI**：run **#49**（`4ff93fd2`，id `38419132192`）23:06 CST dispatch（HTTP 204），
+启动即 in_progress；轮内轮询至 STEP7。回报时仍未出包 → 交下一轮核对。
+
+**下一步**
+1. 核对 run #49：期望 STEP8 通过 + 出包 + Release `ios14-test-49`（`0.2.28.012`）。
+2. 降发热主线候选（按序）：
+   - `cf_challenge_service.dart` `_startChallengeRevealProbe` 250ms 轮询；
+   - `_iosIdleDisposeDelay` 5min → 收紧（现有更安全基础：休眠不再原地重建）；
+   - DoH 出口探针（`probeEffectiveProxy` / `dohEgressVerified`）采样频率。
+3. SS 代理接管内置浏览器（并行方向；`patches/WIP-0002-system-proxy-adaptive-backoff.txt` 为在途草稿）。
