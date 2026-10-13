@@ -859,6 +859,22 @@ class _CfChallengePageState extends State<CfChallengePage>
   static const _backgroundTickInterval = Duration(seconds: 3);
   static const _noChallengeCheckDelay = Duration(milliseconds: 1200);
   static const _revealStateWatchInterval = Duration(milliseconds: 150);
+
+  /// reveal 后「退化为非挑战」看门狗的兜底节拍上限。
+  ///
+  /// [_startRevealedStateWatcher] 以 [_revealStateWatchInterval] 高频轮询，
+  /// 每个节拍都要跑一趟 `evaluateJavascript`（把整页 innerHTML 拉回 Dart）。
+  /// CF 的 JS 正常会在数百毫秒内把页面切走，因此前 [_revealStateWatchFastTicks]
+  /// 个节拍保持 150ms 灵敏度；此后仍没等到事件就说明「内联跳转不触发
+  /// onLoadStart」这个兜底场景大概率不会发生，节拍放宽到
+  /// [_revealStateWatchIdleInterval]，避免整页 innerHTML 在验证页一直可见时
+  /// 长期高占用 CPU/Web 渲染线程（iOS 上直接计入发热）。
+  ///
+  /// 注意：降频只改 Dart 侧 `Future.delayed` 的等待时长，**不是**
+  /// `pauseTimers`/`resumeTimers`，也不注入任何「滚动挂起」逻辑，
+  /// WebView 的 JS 照常执行（硬性禁令）。
+  static const _revealStateWatchFastTicks = 20;
+  static const _revealStateWatchIdleInterval = Duration(milliseconds: 600);
   static const _loadStopFallbackDelay = Duration(milliseconds: 1200);
   static const _pageReadyFallbackDelay = Duration(seconds: 4);
   static const _completionProbeTimeout = Duration(seconds: 8);
@@ -1852,14 +1868,27 @@ class _CfChallengePageState extends State<CfChallengePage>
     final watcherGeneration = ++_revealStateWatchGeneration;
     final loadGeneration = _loadGeneration;
     unawaited(() async {
+      var tick = 0;
       while (true) {
-        await Future.delayed(_revealStateWatchInterval);
+        // 前 [_revealStateWatchFastTicks] 拍保持 150ms 灵敏度，之后放宽到
+        // [_revealStateWatchIdleInterval]——整页 innerHTML 拉取在验证页常驻
+        // 可见时成本不低，不能让一个兜底看门狗长期占据高频节拍。
+        await Future.delayed(
+          tick < _revealStateWatchFastTicks
+              ? _revealStateWatchInterval
+              : _revealStateWatchIdleInterval,
+        );
+        tick++;
         if (_hasPopped || !mounted || _finishingFromVerifyResponse) return;
         if (watcherGeneration != _revealStateWatchGeneration) return;
         if (loadGeneration != _loadGeneration) return;
         if (!_challengeWebViewVisible) return;
         // 超时后不再做主动监测，留给已有超时 UI / 用户操作
         if (_hasTimedOut) return;
+        // 后台不做主动监测：用户看不到页面，且没必要隔着后台拉整页 innerHTML。
+        // 回到前台后 resync（见 [_onAppLifecycleChanged] → [_restartTimeoutTicker]）
+        // 仍会触发超时兜底，验证本身由 CF 的 JS 与 cookie 轮询正常收尾。
+        if (_appLifecycleState != AppLifecycleState.resumed) continue;
 
         final controller = _controller;
         if (controller == null) continue;
