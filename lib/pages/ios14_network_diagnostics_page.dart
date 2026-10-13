@@ -179,6 +179,10 @@ class _Ios14NetworkDiagnosticsPageState
       'avgTotalMs': s.totalRequests == 0 ? 0 : s.totalMs ~/ s.totalRequests,
       'avgJsEvalMs': s.totalRequests == 0 ? 0 : s.jsEvalMs ~/ s.totalRequests,
       'failed': s.failed,
+      'cookieSweeps': s.cookieSweeps,
+      'cookieSweepsSkipped': s.cookieSweepsSkipped,
+      'cookieBatchCountCalls': s.cookieBatchCountCalls,
+      'cookieBatchCountNames': s.cookieBatchCountNames,
     };
   }
 
@@ -272,6 +276,21 @@ class _Ios14NetworkDiagnosticsPageState
           Text(
             '平均耗时 ${_bridge.totalRequests == 0 ? 0 : _bridge.totalMs ~/ _bridge.totalRequests}ms'
             '（其中 JS 调用 ${_bridge.totalRequests == 0 ? 0 : _bridge.jsEvalMs ~/ _bridge.totalRequests}ms）',
+          ),
+          Text(
+            'Cookie 边界同步：执行 ${_bridge.cookieSweeps} 次'
+            ' / 省去 ${_bridge.cookieSweepsSkipped} 次',
+          ),
+          Text(
+            '批量取数：${_bridge.cookieBatchCountCalls} 次调用'
+            '覆盖 ${_bridge.cookieBatchCountNames} 个 cookie 名'
+            '（预计省 ${_bridge.cookieBatchCountNames - _bridge.cookieBatchCountCalls} 次原生枚举）',
+          ),
+          const Text(
+            '说明：边界同步（sweepAll）会对每个 cookie 名做多次原生 cookie 库往返，'
+            '此前每个走桥请求都跑一遍。现仅在新建 WebView 会话或 WV 侧写过 cookie 后执行，'
+            '且变体计数改为一次批量调用（原生侧一次 getAllCookies 枚举），'
+            '「省去」次数即本轮减少的原生调用批次。',
           ),
           const Text(
             '说明：统计自进程启动以来所有经 WebView 桥的请求，常驻聚合、不含 URL 与正文。'

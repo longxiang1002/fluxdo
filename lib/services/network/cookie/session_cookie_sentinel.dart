@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:synchronized/synchronized.dart';
 
 import '../../auth_session.dart';
+import '../adapters/webview_bridge_diagnostics.dart';
 import 'cookie_full_info.dart';
 import 'cookie_jar_service.dart';
 import 'cookie_logger.dart';
@@ -86,11 +87,16 @@ class SessionCookieSentinel {
   /// 权衡: 窗口内 WV 新产生的变体会推迟到下一次该 name 的 sweep 处理
   /// (sweep 本就是最终一致的兜底)。delete 意图与 [sweepAll]（boundary
   /// sync / priming 等关键路径）不节流。
+  ///
+  /// [variantsBeforeOverride] 由 [sweepAll] 的批量取数注入：调用方已经用
+  /// 一次批量调用拿到了该 name 的 WV 变体数，这里直接复用，避免每个 name
+  /// 再各做一次 `getAllCookies` 全量枚举。为 null 时按原逻辑自行读取。
   Future<SweepResult> sweep(
     String url,
     String name, {
     SweepIntent intent = SweepIntent.ensureUnique,
     bool force = false,
+    int? variantsBeforeOverride,
   }) async {
     if (!force &&
         intent == SweepIntent.ensureUnique &&
@@ -110,7 +116,8 @@ class SessionCookieSentinel {
       // package:synchronized 3.4.0 的 synchronized<T> 支持 timeout 参数
       // (验证项 V11 已在 Phase 3 验证)
       return await lock.synchronized<SweepResult>(
-        () => _sweepInternal(url, name, intent, entryGen),
+        () =>
+            _sweepInternal(url, name, intent, entryGen, variantsBeforeOverride),
         timeout: _lockTimeout,
       );
     } on TimeoutException {
@@ -131,6 +138,13 @@ class SessionCookieSentinel {
   ///
   /// name 集合 = jar 中适用 cookie 的 name ∪ WV 中已有 cookie 的 name。
   /// 这样既同步 jar 已有的, 也清理 WV 中孤儿/重复的。
+  ///
+  /// 性能（活跃刷帖发热）：每个 name 的 sweep 第一步都要读一次 WV 变体数
+  /// （[RawCookieWriter.countCookiesByName]），iOS 原生实现每次都做一次
+  /// `WKHTTPCookieStore.getAllCookies` 全量枚举。几十个 name 就是几十次全量
+  /// 枚举 + 跨语言往返，是活跃负载下的固定桥开销。这里先用一次批量调用
+  /// [RawCookieWriter.countCookiesByNames] 拿到全部计数（原生侧一次枚举），
+  /// 再把它作为 `variantsBefore` 注入各 name 的 sweep，省掉重复枚举。
   Future<List<SweepResult>> sweepAll(String url) async {
     final uri = Uri.parse(url);
     final names = <String>{};
@@ -147,7 +161,31 @@ class SessionCookieSentinel {
       debugPrint('[Sentinel] sweepAll wv lookup failed: $e');
     }
     if (names.isEmpty) return const [];
-    final futures = names.map((name) => sweep(url, name, force: true));
+
+    // 一次批量取数：把 N 次 getAllCookies 全量枚举压成 1 次。
+    // 失败时返回空 map，各 sweep 会回退到自己再读一次（行为等价，只是慢）。
+    Map<String, int> variantsBefore;
+    try {
+      variantsBefore = await _writer.countCookiesByNames(
+        url,
+        names.toList(growable: false),
+      );
+      final stats = WebViewBridgeDiagnostics.instance;
+      stats.cookieBatchCountCalls++;
+      stats.cookieBatchCountNames += names.length;
+    } catch (e) {
+      debugPrint('[Sentinel] sweepAll batch count failed: $e');
+      variantsBefore = const {};
+    }
+
+    final futures = names.map(
+      (name) => sweep(
+        url,
+        name,
+        force: true,
+        variantsBeforeOverride: variantsBefore[name],
+      ),
+    );
     return await Future.wait(futures);
   }
 
@@ -267,8 +305,9 @@ class SessionCookieSentinel {
     String url,
     String name,
     SweepIntent intent,
-    int entryGen,
-  ) async {
+    int entryGen, [
+    int? variantsBeforeOverride,
+  ]) async {
     final stopwatch = Stopwatch()..start();
     _eventController.add(SweepInvoked(url: url, name: name, intent: intent));
     CookieLogger.sweep(
@@ -284,7 +323,9 @@ class SessionCookieSentinel {
       return _emitCancelled(url, name, entryGen, stopwatch);
     }
 
-    final variantsBefore = await _writer.countCookiesByName(url, name);
+    // 批量取数注入时直接复用，省掉一次 WV 全量枚举（见 sweepAll）。
+    final variantsBefore =
+        variantsBeforeOverride ?? await _writer.countCookiesByName(url, name);
 
     if (intent == SweepIntent.delete) {
       return await _sweepDelete(
@@ -507,9 +548,9 @@ class SessionCookieSentinel {
     int expectedMaxAfter,
   ) async {
     if (!_chipsCookieNames.contains(name)) return false;
-    final variants = (await _writer.getAllCookieInfos(url))
-        .where((c) => c.name == name)
-        .toList(growable: false);
+    final variants = (await _writer.getAllCookieInfos(
+      url,
+    )).where((c) => c.name == name).toList(growable: false);
     if (variants.isEmpty) return true;
     final partitioned = variants.where((c) => c.isPartitioned == true).length;
     final nonPartitioned = variants.length - partitioned;
@@ -718,6 +759,8 @@ class SessionCookieSentinel {
         cookieToWrite.toSetCookieHeader(),
         writeSharedStorage: cookieToWrite.name != 'cf_clearance',
       );
+      // D2: WV 侧已写入 → 让下一次请求的边界同步重新生效。
+      WebViewBridgeDiagnostics.instance.markWvCookieMutated();
       return;
     }
 
@@ -763,6 +806,8 @@ class SessionCookieSentinel {
       attrs.join('; '),
       writeSharedStorage: winner.name != 'cf_clearance',
     );
+    // D2: WV 侧已写入 → 让下一次请求的边界同步重新生效。
+    WebViewBridgeDiagnostics.instance.markWvCookieMutated();
   }
 
   /// 反向同步 winner 到 jar（路径 B 场景）。
@@ -838,7 +883,8 @@ class SessionCookieSentinel {
     final after = await _writer.countCookiesByName(url, name);
     final expectedMaxAfter = intent == SweepIntent.delete ? 0 : 1;
     final targetSatisfied =
-        after <= expectedMaxAfter || await _residualIsAcceptable(url, name, expectedMaxAfter);
+        after <= expectedMaxAfter ||
+        await _residualIsAcceptable(url, name, expectedMaxAfter);
     final status = targetSatisfied
         ? SweepStatus.nuclearReset
         : SweepStatus.failed;

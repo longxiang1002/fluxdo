@@ -271,4 +271,66 @@ class RawCookieWriter {
       return 0;
     }
   }
+
+  /// **批量**统计多个 cookie name 在指定 url 下的变体数量。
+  ///
+  /// 与逐个调用 [countCookiesByName] 语义完全一致，但 iOS/macOS 上只发起
+  /// **一次** `getAllCookies` 枚举，然后在原生侧一次性按 name 归类计数。
+  ///
+  /// 动机（活跃刷帖发热）：`sweepAll` 会对「jar 适用 cookie ∪ WV 已有 cookie」
+  /// 的每个 name 各调一次 [countCookiesByName]，而 iOS 原生实现每次都做一次
+  /// `WKHTTPCookieStore.getAllCookies` 全量枚举（几十个 cookie 的字典构造 +
+  /// 跨语言序列化）。几十个 name 就是几十次全量枚举，纯属重复劳动。
+  ///
+  /// 返回 map 覆盖 [names] 中每个 name（无变体则为 0）。原生通道不可用时
+  /// 逐 name 退化为 [countCookiesByName]，保证行为等价。
+  Future<Map<String, int>> countCookiesByNames(
+    String url,
+    List<String> names,
+  ) async {
+    if (names.isEmpty) return const {};
+    if (_hasDartFallback) {
+      final out = <String, int>{};
+      for (final name in names) {
+        out[name] = await RawCookieWriterFallback.instance.countCookiesByName(
+          url,
+          name,
+        );
+      }
+      return out;
+    }
+    try {
+      final raw = await _channel.invokeMapMethod<String, dynamic>(
+        'countCookiesByNames',
+        {'url': url, 'names': names},
+      );
+      if (raw == null) {
+        // 原生未实现该通道（旧包/未升级平台）→ 逐 name 退化，行为等价。
+        return _countByNamesFallback(url, names);
+      }
+      final out = <String, int>{};
+      for (final name in names) {
+        final v = raw[name];
+        out[name] = v is int ? v : 0;
+      }
+      return out;
+    } on PlatformException catch (e) {
+      debugPrint('[RawCookieWriter] countCookiesByNames failed: $e');
+      return _countByNamesFallback(url, names);
+    } on MissingPluginException {
+      debugPrint('[RawCookieWriter] Platform channel not available');
+      return _countByNamesFallback(url, names);
+    }
+  }
+
+  Future<Map<String, int>> _countByNamesFallback(
+    String url,
+    List<String> names,
+  ) async {
+    final out = <String, int>{};
+    for (final name in names) {
+      out[name] = await countCookiesByName(url, name);
+    }
+    return out;
+  }
 }

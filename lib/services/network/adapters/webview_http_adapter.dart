@@ -280,7 +280,18 @@ document.close();
           debugPrint('[WebViewAdapter] priming failed (continuing): $e');
         }
         if (syncAppCookies) {
-          await SessionCookieSentinel.instance.sweepAll(url);
+          // D2: 仅在「本 WebView 会话尚未做过边界同步」或「WV 自上次同步后又
+          // 写过 cookie」时才跑 sweepAll。sweepAll 是 O(cookie 数) 次原生
+          // method channel 往返（每 name 3 次），活跃刷帖时每个请求都跑一遍
+          // 是纯浪费——prime() 幂等保证 jar→WV 已经就绪，sweep 只负责
+          // 清 WV 侧多出来的变体，而变体只可能来自 WV 自身写入。
+          if (!bridgeStats.cookieBoundarySynced) {
+            await SessionCookieSentinel.instance.sweepAll(url);
+            bridgeStats.cookieBoundarySynced = true;
+            bridgeStats.cookieSweeps++;
+          } else {
+            bridgeStats.cookieSweepsSkipped++;
+          }
         }
         cookiePrepWatch.stop();
         cookiePrepElapsed = cookiePrepWatch.elapsed;
@@ -1001,6 +1012,9 @@ document.close();
     _initCompleter = null;
     _activeCriticalCookieSync = null;
     _lastCriticalCookieSyncAt = null;
+    // 新的 WebView 会话 = 新的 cookie 存储，边界同步标记必须一并复位，
+    // 否则重建后的第一个请求会跳过 sweep，把 WV 侧残留变体留在库里。
+    WebViewBridgeDiagnostics.instance.resetCookieBoundarySync();
     for (final completer in _pendingRequests.values) {
       if (!completer.isCompleted) {
         completer.completeError(

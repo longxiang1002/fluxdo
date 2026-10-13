@@ -284,6 +284,16 @@ import workmanager_apple
           }
           AppDelegate.countCookiesByNameIOS(url: url, name: name, result: result)
 
+        case "countCookiesByNames":
+          guard let args = call.arguments as? [String: Any],
+                let urlString = args["url"] as? String,
+                let names = args["names"] as? [String],
+                let url = URL(string: urlString) else {
+            result([String: Int]())
+            return
+          }
+          AppDelegate.countCookiesByNamesIOS(url: url, names: names, result: result)
+
         default:
           result(FlutterMethodNotImplemented)
         }
@@ -651,6 +661,40 @@ import workmanager_apple
 
       DispatchQueue.main.async {
         result(count)
+      }
+    }
+  }
+
+  /// **批量**统计多个 cookie name 的变体数：只做一次 `getAllCookies` 枚举，
+  /// 在原生侧一次性归类计数。
+  ///
+  /// 与逐个调用 `countCookiesByNameIOS` 结果完全一致（同一套适用域过滤），
+  /// 但把 N 次全量枚举压成 1 次。这是活跃刷帖时 `sweepAll` 的主要固定开销。
+  private static func countCookiesByNamesIOS(
+    url: URL,
+    names: [String],
+    result: @escaping FlutterResult
+  ) {
+    let store = WKWebsiteDataStore.default().httpCookieStore
+    let host = (url.host ?? "").lowercased()
+    let wanted = Set(names)
+
+    store.getAllCookies { cookies in
+      var counts = [String: Int]()
+      for name in names {
+        counts[name] = 0
+      }
+      for cookie in cookies where wanted.contains(cookie.name) {
+        let cookieDomain = (cookie.domain.hasPrefix(".")
+          ? String(cookie.domain.dropFirst())
+          : cookie.domain).lowercased()
+        if host == cookieDomain || host.hasSuffix("." + cookieDomain) {
+          counts[cookie.name, default: 0] += 1
+        }
+      }
+
+      DispatchQueue.main.async {
+        result(counts)
       }
     }
   }

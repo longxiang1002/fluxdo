@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:enhanced_cookie_jar/enhanced_cookie_jar.dart';
 import 'package:flutter/foundation.dart';
 
+import '../adapters/webview_bridge_diagnostics.dart';
 import 'cookie_jar_service.dart';
 import 'cookie_logger.dart';
 import 'cookie_store_observer.dart';
@@ -328,6 +329,8 @@ class WebViewCookiePriming {
         writeSharedStorage: fresh.name != 'cf_clearance',
       );
       written = written || ok;
+      // D2: WV 侧已写入 → 让下一次请求的边界同步重新生效。
+      WebViewBridgeDiagnostics.instance.markWvCookieMutated();
       postCount = await _writer.countCookiesByName(url, fresh.name);
       if (postCount == 1) {
         return _PrimeWriteResult(

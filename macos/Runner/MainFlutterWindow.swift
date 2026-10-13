@@ -214,6 +214,16 @@ class MainFlutterWindow: NSWindow {
         }
         MainFlutterWindow.countCookiesByNameApple(url: url, name: name, result: result)
 
+      case "countCookiesByNames":
+        guard let args = call.arguments as? [String: Any],
+              let urlString = args["url"] as? String,
+              let names = args["names"] as? [String],
+              let url = URL(string: urlString) else {
+          result([String: Int]())
+          return
+        }
+        MainFlutterWindow.countCookiesByNamesApple(url: url, names: names, result: result)
+
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -445,6 +455,36 @@ class MainFlutterWindow: NSWindow {
 
       DispatchQueue.main.async {
         result(count)
+      }
+    }
+  }
+
+  /// 批量统计多个 cookie name 的变体数：只做一次 `getAllCookies` 枚举。
+  private static func countCookiesByNamesApple(
+    url: URL,
+    names: [String],
+    result: @escaping FlutterResult
+  ) {
+    let store = WKWebsiteDataStore.default().httpCookieStore
+    let host = (url.host ?? "").lowercased()
+    let wanted = Set(names)
+
+    store.getAllCookies { cookies in
+      var counts = [String: Int]()
+      for name in names {
+        counts[name] = 0
+      }
+      for cookie in cookies where wanted.contains(cookie.name) {
+        let cookieDomain = (cookie.domain.hasPrefix(".")
+          ? String(cookie.domain.dropFirst())
+          : cookie.domain).lowercased()
+        if host == cookieDomain || host.hasSuffix("." + cookieDomain) {
+          counts[cookie.name, default: 0] += 1
+        }
+      }
+
+      DispatchQueue.main.async {
+        result(counts)
       }
     }
   }
