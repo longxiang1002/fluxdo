@@ -4,6 +4,74 @@
 > **2026-10-13 起主攻**：DoH 模式下 App 仍旧发热（症状=**活跃刷帖时**发热，非空闲）。
 
 
+## 🎯 本轮（2026-10-14 15:00 CST）— D6：WebView 桥跨配置变更复用（活跃负载降重建开销）
+
+### CI 前置核对（强制第 0 步）
+- **#62** `b44a8357` = ✅ **success**，Release **`ios14-test-62`** 已出
+  （D5+D4+D2，`0.2.28.019`），IPA 直链：
+  `https://github.com/longxiang1002/fluxdo/releases/download/ios14-test-62/fluxdo-ios14-test-62-b44a8357.ipa`
+- **#61** = ✅ success（`ios14-test-61`）；**#60** = ❌ failure（已被 #61 修复，无遗留）。
+- → 无未修复 failure、无缺 Release，本轮可推进。
+
+### 本轮改动（D6：活跃负载下省掉隐藏 WKWebView 的无谓重建）
+证据（`platform_adapter.dart:651-663` 改前）：
+- `_ensureDelegate()` 在 `configChanged` 时**无条件** `for (delegate in _delegates.values) delegate.close(force:false)` 再 `_delegates.clear()`。
+- `WebViewHttpAdapter` 的构造**不依赖** DoH/proxy/rhttp 设置，它只依赖
+  `WebViewAdapterSettingsService.effectiveEnabled`（开关变化已由
+  `_handleWebViewSettingChanged` → `disposeWhenIdle()` 单独管理）。
+- 但 `close(force:false)`（`_activeFetches==0` 时）会**立即 dispose 掉隐藏 WKWebView**，
+  下一次走桥请求必须从零重建（run + loadData + 等页面加载 + 全量重灌 cookie）并作废边界同步标记。
+- **发热链路**：活跃刷帖期间任何与 WebView 无关的设置版本 bump（DoH 应用、代理状态刷新、
+  rhttp 变更、CF 降级翻转）都会触发这次无谓重建——是活跃负载下的固定 CPU/耗电源。
+
+改动：
+- `platform_adapter.dart`：`configChanged` 分支只拆「依赖这些设置」的 delegate，
+  `AdapterType.webview` 保留复用；需要拆它时由 `effectiveEnabled` 变化或显式 `close()` 负责。
+- `webview_bridge_diagnostics.dart`：新增 `webViewPreservedOnConfigChange` 计数 + `markWebViewPreservedOnConfigChange()`；`reset()` 同步复位。
+- `ios14_network_diagnostics_page.dart`：snapshot 暴露该计数 + UI 显示「WebView 桥跨配置变更复用：N 次」。
+- **硬性禁令遵守**：无 pauseTimers/resumeTimers，无滚动挂起，不阻塞 JS。
+
+### 本地验证（CI 同款 Dart 3.12.0）
+- `dart format --output=none --set-exit-if-changed`：3 files **0 changed，exit 0** ✅。
+
+### CI
+push 本轮 commit（`APP_VERSION_SUFFIX` 019→**020**）→ 待触发 workflow。
+
+### 下一步
+1. 等本轮 run → 确认 Release + IPA 直链。
+2. 老板实机验证 D6 对活跃发热的影响（诊断页看「WebView 桥跨配置变更复用」计数）。
+3. 若成功，下一轮继续找活跃负载发热源。
+
+
+## 🎯 已完成（2026-10-14 13:00 CST）— D5：响应体免二次 JSON 转义（活跃负载降 CPU）
+
+### CI 前置核对（强制第 0 步）
+- **#61** `a2066c6c`(id 38509271673) = ✅ **success**，全 15 步绿；
+  Release **`ios14-test-61`** 已出（D4+D2，`0.2.28.018`）✅。
+- **#60** = ❌ failure（step8 analyze `_resyncWindow` unused_field）→ 已被 #61 修复，无遗留。
+- → 无未修复 failure、无缺 Release，本轮可推进。
+
+### 本轮改动（commit `b44a8357`）
+D5：文本响应体不再被「整包 JSON 转义两次 / 反转义两次」。
+- `webview_http_adapter.dart`：JS 成功/错误路径把 `body` 与元数据作**平级字段**传回；
+  handler 直接解析成 Map 并 `complete(parsed)`（保留旧 `result` 字符串兜底）；
+  `_pendingRequests` 类型 `Completer<String>` → `Completer<Map<String,dynamic>>`；
+  调用方去掉自身 `jsonDecode(resultStr)`；二进制 fallback 同步改平级字段。
+- `webview_bridge_diagnostics.dart`：新增 `textBodyUnescaped` / `textBodyUnescapedBytes`。
+- `ios14_network_diagnostics_page.dart`：显示「响应体免二次转义 N 次（约 N B）」。
+- **硬性禁令遵守**：无 pauseTimers/resumeTimers，无滚动挂起，不阻塞 JS。
+
+### 本地验证（CI 同款 Dart 3.12.0）
+- `dart format --set-exit-if-changed`：3 files **0 changed，exit 0** ✅。
+
+### CI
+push `b44a8357`（`APP_VERSION_SUFFIX` 018→**019**）→ **#62**（id 38515163353，in_progress）。
+
+### 下一步
+1. 等 #62 → 确认 Release `ios14-test-62`（`0.2.28.019`）+ IPA 直链。
+2. 老板实机验证 D5 对活跃发热的影响。
+3. 若成功，下一轮继续找活跃负载发热源。
+
 ## 🎯 本轮（2026-10-14 10:00 CST）— D4：边界同步延后收敛（活跃请求路径摘掉 sweepAll）
 
 ### CI 前置核对（强制第 0 步）

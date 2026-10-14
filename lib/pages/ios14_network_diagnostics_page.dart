@@ -188,6 +188,7 @@ class _Ios14NetworkDiagnosticsPageState
       'cookieSweepsDeferred': s.cookieSweepsDeferred,
       'textBodyUnescaped': s.textBodyUnescaped,
       'textBodyUnescapedBytes': s.textBodyUnescapedBytes,
+      'webViewPreservedOnConfigChange': s.webViewPreservedOnConfigChange,
     };
   }
 
@@ -302,6 +303,11 @@ class _Ios14NetworkDiagnosticsPageState
               '响应体免二次转义：${_bridge.textBodyUnescaped} 次'
               '（约 ${_bridge.textBodyUnescapedBytes}B）'
               '（D5：body 改平级字段回传，省下旧路径「JS 整包转义 + Dart 整包反转义」）',
+            ),
+          if (_bridge.webViewPreservedOnConfigChange > 0)
+            Text(
+              'WebView 桥跨配置变更复用：${_bridge.webViewPreservedOnConfigChange} 次'
+              '（D6：无关设置版本 bump 不再拆掉隐藏 WKWebView，省下重建 + 重灌 cookie）',
             ),
           Text(
             '批量取数：${_bridge.cookieBatchCountCalls} 次调用'

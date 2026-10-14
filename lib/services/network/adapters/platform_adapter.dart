@@ -652,10 +652,32 @@ class _DynamicAdapter implements HttpClientAdapter {
 
     if (configChanged) {
       // 不要强杀旧 delegate，避免进行中的 Cronet/rhttp 请求触发 native 崩溃。
-      for (final delegate in _delegates.values) {
-        delegate.close(force: false);
+      //
+      // D6: WebView 桥刻意**不**随设置版本号一起拆。
+      //
+      // WebViewHttpAdapter 的构造不依赖 DoH/proxy/rhttp 设置——它只依赖
+      // WebViewAdapterSettingsService.effectiveEnabled，而该开关已由
+      // _handleWebViewSettingChanged → disposeWhenIdle() 单独管理。
+      // 但它持有的隐藏 WKWebView 是整条桥里最重的一次性资源：一旦
+      // close(force:false)（_activeFetches==0 时）会立即 dispose 掉 WebView，
+      // 下一次走桥请求必须从零重建（run + loadData + 等页面加载 + 全量重灌
+      // cookie），并作废边界同步标记。活跃刷帖期间任何与 WebView 无关的设置
+      // 版本 bump（DoH 应用、代理状态刷新、rhttp 变更、CF 降级翻转）都会
+      // 触发这次无谓的重建，是活跃负载下的固定发热源。
+      //
+      // 因此这里只拆「依赖这些设置」的 delegate，WebView 桥保留复用；
+      // 需要拆它时由 effectiveEnabled 变化或显式 close() 负责。
+      const preserved = AdapterType.webview;
+      final toClose = _delegates.entries
+          .where((entry) => entry.key != preserved)
+          .toList(growable: false);
+      for (final entry in toClose) {
+        entry.value.close(force: false);
+        _delegates.remove(entry.key);
       }
-      _delegates.clear();
+      if (_delegates.containsKey(preserved)) {
+        WebViewBridgeDiagnostics.instance.markWebViewPreservedOnConfigChange();
+      }
     }
 
     final existing = _delegates[desiredType];

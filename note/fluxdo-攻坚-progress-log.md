@@ -1518,3 +1518,90 @@ push `98f27565` + `483a18f1`（`APP_VERSION_SUFFIX` 017→**018**）→ **#60**�
 1. 等 #61 出包 → 确认 Release `ios14-test-61`（0.2.28.018）+ IPA 直链。
 2. 老板实机验证 D4（边界同步延后收敛）+ D2（同源图片分流原生）对活跃发热的影响。
 3. 若 #61 成功，下一轮回到主线：继续找「活跃负载」发热源（D1 量化走桥请求数/字节量）。
+
+---
+
+## 2026-10-14 13:00（北京时间）· 轮次：D5 响应体免二次转义
+
+### 0) 上轮 CI 核对（强制）
+- 查最近 3 次 run：**#61** `a2066c6c` = ✅ success（全绿，Release `ios14-test-61` / `0.2.28.018` 已出，
+  IPA 54,890,000B）；#60 `483a18f1` = ❌ failure（已修）；#59 = ✅。
+- → 无未修复 failure、无缺 Release，本轮可推进主线。
+
+### 1) 状态基线
+- 分支 `fix/ios14-network-thermal`，HEAD `8d07817a`。工作区仅 `core/doh_proxy` 子模块脏（历史遗留，未动）。
+
+### 2) 本轮改造 —— D5：文本响应体「免二次 JSON 转义」（活跃负载降 CPU）
+**证据（先读代码定位，非猜测）**：
+- 文本响应路径（`webview_http_adapter.dart` 旧 :388-401）JS 侧：
+  `const result = JSON.stringify({ok,status,headers, body: bodyData})` —— body 被转义**第一次**；
+  再 `callHandler('fetchResult', {requestId, result})`。
+- 插件侧（`flutter_inappwebview_web` 的 `web_support.js:82`）对参数做
+  `_JSON_stringify(_Array_slice.call(arguments, 1))` —— 整包（含已转义的 body）被转义**第二次**。
+- Dart 侧：插件先 `jsonDecode` 反转义一次，我们的 `jsonDecode(resultStr)` 再反转义一次。
+- 结论：**每条文本响应，body 被整包转义 2 次 + 反转义 2 次**，全部在主 isolate。
+  刷帖时话题列表/详情 JSON 动辄数十~数百 KB → 这正是「活跃使用时发热」的固定桥开销。
+
+**改动（commit `b44a8357`）**：
+- JS 成功/错误路径改为把 `body` 与元数据作**平级字段**传回（`{requestId, ok, status, statusText, headers, body}`），
+  不再嵌进 `result` 字符串 → body 只经插件序列化**一次**。
+- Dart handler 改为把收到的对象**直接**解析成 `Map` 并 `complete(parsed)`；保留旧 `result` 字符串形态的
+  兜底解析（兼容未更新的 JS / 缓存页面）。
+- `_pendingRequests` 类型 `Completer<String>` → `Completer<Map<String,dynamic>>`；调用方去掉
+  自身的 `jsonDecode(resultStr)`。
+- 二进制流 fallback 的 `callHandler('fetchResult', …)` 同步改为平级字段。
+- `webview_bridge_diagnostics.dart` 新增 `textBodyUnescaped` / `textBodyUnescapedBytes` 计数；
+  诊断页新增「响应体免二次转义：N 次（约 N B）」。
+- **硬性禁令遵守**：未触碰任何 WebView 挂起/暂停 API，无 pauseTimers/resumeTimers，不阻塞 JS。
+
+### 3) 本地验证（CI 同款工具链 Dart 3.12.0）
+- `dart format --output=none --set-exit-if-changed`：3 files **0 changed，exit 0** ✅。
+- `dart analyze` 本机 analysis server 崩溃（`git stash` 对照确认**基线同样崩溃**，属本机环境问题），以 CI 为准。
+
+### 4) 提交与 CI
+- commit `b44a8357`，push `8d07817a..b44a8357`。
+- `APP_VERSION_SUFFIX` 018 → **019**。
+- 触发 workflow → **run #62**（id `38515163353`，in_progress）。
+
+### 下一步
+1. 等 #62 出包 → 确认 Release `ios14-test-62`（`0.2.28.019`）+ IPA 直链。
+2. 老板实机：诊断页「重置桥统计」→ 刷帖 → 看「响应体免二次转义 N 次 / 约 N B」+ 发热是否下降。
+3. 若 #62 成功，下一轮继续找活跃负载发热源（候选：请求体 base64 fallback 频率、桥并发上限）。
+
+---
+
+## 2026-10-14 15:00 CST — D6：WebView 桥跨配置变更复用（活跃负载降重建开销）
+
+### 0) CI 前置核对
+- **#62** `b44a8357` = ✅ success，Release **`ios14-test-62`** 已出（D5+D4+D2，`0.2.28.019`），
+  IPA：`https://github.com/longxiang1002/fluxdo/releases/download/ios14-test-62/fluxdo-ios14-test-62-b44a8357.ipa`
+- **#61** = ✅ success；**#60** = ❌ failure（已被 #61 修复，无遗留）→ 无未修复 failure、无缺 Release。
+
+### 1) 证据
+- `platform_adapter.dart:651-663`（改前）：`_ensureDelegate()` 的 `configChanged` 分支
+  **无条件** `close(force:false)` 全部 delegate 并 `_delegates.clear()`。
+- `WebViewHttpAdapter` 构造**不依赖** DoH/proxy/rhttp 设置，只依赖
+  `WebViewAdapterSettingsService.effectiveEnabled`（开关变化由
+  `_handleWebViewSettingChanged` → `disposeWhenIdle()` 单独管理）。
+- `close(force:false)` 在 `_activeFetches==0` 时**立即 dispose 隐藏 WKWebView** →
+  下次走桥请求从零重建（run + loadData + 等加载 + 全量重灌 cookie）+ 作废边界同步标记。
+- 活跃刷帖期间任何无关设置版本 bump（DoH 应用/代理刷新/rhttp/CF 降级翻转）都会触发该重建
+  → 活跃负载下的固定 CPU/耗电源。
+
+### 2) 改动
+- `platform_adapter.dart`：`configChanged` 分支只拆非 webview delegate，`AdapterType.webview` 保留复用。
+- `webview_bridge_diagnostics.dart`：新增 `webViewPreservedOnConfigChange` + `markWebViewPreservedOnConfigChange()`，`reset()` 复位。
+- `ios14_network_diagnostics_page.dart`：snapshot + UI 显示「WebView 桥跨配置变更复用：N 次」。
+- 禁令遵守：无 pauseTimers/resumeTimers、无滚动挂起、不阻塞 JS。
+
+### 3) 本地验证（CI 同款 Dart 3.12.0）
+- `dart format --output=none --set-exit-if-changed`：3 files **0 changed，exit 0** ✅。
+
+### 4) 提交与 CI
+- `APP_VERSION_SUFFIX` 019 → **020**。
+- commit 与 run 号见下方追加。
+
+### 下一步
+1. 等本轮 run → 确认 Release + IPA 直链。
+2. 老板实机验证 D6（诊断页看计数）+ 活跃发热变化。
+3. 下一轮继续找活跃负载发热源。

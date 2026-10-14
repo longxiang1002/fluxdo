@@ -153,6 +153,18 @@ class WebViewBridgeDiagnostics {
   /// D5: 上述省下的转义字节量（按响应体长度估算，仅整数累加）。
   int textBodyUnescapedBytes = 0;
 
+  /// D6: 因「与 WebView 无关的设置版本变更」而**保留复用** WebView 桥的次数。
+  ///
+  /// 旧行为下每次设置版本 bump 都会 close 掉 WebView delegate，导致隐藏
+  /// WKWebView 被 dispose、下一次走桥请求必须从零重建（run + loadData +
+  /// 等页面加载 + 全量重灌 cookie）。每 +1 表示省下了一次这样的重建。
+  int webViewPreservedOnConfigChange = 0;
+
+  /// D6: 标记「配置变更时保留了 WebView 桥」。
+  void markWebViewPreservedOnConfigChange() {
+    webViewPreservedOnConfigChange++;
+  }
+
   /// D2: 新的 WebView 会话建立/销毁时复位（新存储 = 需重新同步）。
   void resetCookieBoundarySync() {
     cookieBoundarySynced = false;
@@ -193,6 +205,7 @@ class WebViewBridgeDiagnostics {
     cookieSweepsDeferred = 0;
     textBodyUnescaped = 0;
     textBodyUnescapedBytes = 0;
+    webViewPreservedOnConfigChange = 0;
     _variantCounts.clear();
   }
 }
