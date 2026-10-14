@@ -142,6 +142,17 @@ class WebViewBridgeDiagnostics {
   /// D3: 因复用缓存计数而省下的原生 `getAllCookies` 全量枚举次数。
   int variantCountCacheHits = 0;
 
+  /// D5: 因「响应体免二次 JSON 转义」而省下的整包往返次数。
+  ///
+  /// 旧路径把整个响应体嵌进 `JSON.stringify({body})` 再交给插件序列化，
+  /// 于是 body 被转义两次、Dart 侧被反转义两次（`jsonDecode` 内层 + 插件外层）。
+  /// 新路径把 body 作为平级字段传回，只经插件一次序列化。每 +1 表示
+  /// 一条文本响应省下「一次 JS 整包转义 + 一次 Dart 整包反转义」。
+  int textBodyUnescaped = 0;
+
+  /// D5: 上述省下的转义字节量（按响应体长度估算，仅整数累加）。
+  int textBodyUnescapedBytes = 0;
+
   /// D2: 新的 WebView 会话建立/销毁时复位（新存储 = 需重新同步）。
   void resetCookieBoundarySync() {
     cookieBoundarySynced = false;
@@ -180,6 +191,8 @@ class WebViewBridgeDiagnostics {
     variantCountCacheHits = 0;
     cookieResyncPending = false;
     cookieSweepsDeferred = 0;
+    textBodyUnescaped = 0;
+    textBodyUnescapedBytes = 0;
     _variantCounts.clear();
   }
 }

@@ -186,6 +186,8 @@ class _Ios14NetworkDiagnosticsPageState
       'variantCountCacheHits': s.variantCountCacheHits,
       'imageRoutedNative': s.imageRoutedNative,
       'cookieSweepsDeferred': s.cookieSweepsDeferred,
+      'textBodyUnescaped': s.textBodyUnescaped,
+      'textBodyUnescapedBytes': s.textBodyUnescapedBytes,
     };
   }
 
@@ -294,6 +296,12 @@ class _Ios14NetworkDiagnosticsPageState
               '边界同步延后收敛：${_bridge.cookieSweepsDeferred} 次'
               '（D4：WV cookie 变化交由 debounce 在请求路径外收敛，'
               '不再让每个走桥请求各背一次 sweepAll）',
+            ),
+          if (_bridge.textBodyUnescaped > 0)
+            Text(
+              '响应体免二次转义：${_bridge.textBodyUnescaped} 次'
+              '（约 ${_bridge.textBodyUnescapedBytes}B）'
+              '（D5：body 改平级字段回传，省下旧路径「JS 整包转义 + Dart 整包反转义」）',
             ),
           Text(
             '批量取数：${_bridge.cookieBatchCountCalls} 次调用'

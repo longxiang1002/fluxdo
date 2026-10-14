@@ -76,7 +76,9 @@ class WebViewHttpAdapter implements HttpClientAdapter {
   Future<void>? _activeCriticalCookieSync;
   DateTime? _lastCriticalCookieSyncAt;
 
-  final Map<String, Completer<String>> _pendingRequests = {};
+  /// 文本响应的待决请求：handler 里已把 JS 传来的对象解析成 Map，
+  /// 这里直接携带 Map，调用方不再二次 `jsonDecode`（D5）。
+  final Map<String, Completer<Map<String, dynamic>>> _pendingRequests = {};
   int _requestId = 0;
   int _activeFetches = 0;
   bool _disposeWhenIdle = false;
@@ -115,13 +117,32 @@ class WebViewHttpAdapter implements HttpClientAdapter {
               if (args.isNotEmpty && args[0] is Map) {
                 final data = args[0] as Map;
                 final requestId = data['requestId']?.toString();
-                final result = data['result']?.toString() ?? '';
-
-                if (requestId != null &&
-                    _pendingRequests.containsKey(requestId)) {
-                  _pendingRequests[requestId]!.complete(result);
-                  _pendingRequests.remove(requestId);
+                if (requestId == null ||
+                    !_pendingRequests.containsKey(requestId)) {
+                  return;
                 }
+                // D5: 新形态把响应元数据与 body 作为**平级字段**传回，
+                // 插件只会 JSON 序列化一次，body 不再被二次转义/反转义。
+                // 旧形态把整个响应塞进 `result` 字符串，这里保留兜底解析，
+                // 以便与未更新的 JS（如缓存中的旧页面）兼容。
+                final Map<String, dynamic> parsed;
+                if (data.containsKey('body') || data.containsKey('ok')) {
+                  parsed = <String, dynamic>{
+                    'ok': data['ok'],
+                    'status': data['status'],
+                    'statusText': data['statusText'],
+                    'headers': data['headers'],
+                    'body': data['body'],
+                    'error': data['error'],
+                  };
+                } else {
+                  final result = data['result']?.toString() ?? '';
+                  parsed = result.isEmpty
+                      ? <String, dynamic>{'ok': false, 'error': 'empty result'}
+                      : (jsonDecode(result) as Map).cast<String, dynamic>();
+                }
+                _pendingRequests[requestId]!.complete(parsed);
+                _pendingRequests.remove(requestId);
               }
             },
           );
@@ -351,7 +372,7 @@ document.close();
         return response;
       }
 
-      final completer = Completer<String>();
+      final completer = Completer<Map<String, dynamic>>();
       _pendingRequests[requestId] = completer;
 
       final script =
@@ -386,7 +407,10 @@ document.close();
           const headersObj = {};
           response.headers.forEach((v, k) => headersObj[k] = v);
 
-          const result = JSON.stringify({
+          // D5: body 与元数据平级传回，避免把 body 嵌进 JSON 字符串里
+          // 造成「JS 转义一次 + 插件再转义一次 / Dart 反转义两次」的整包往返。
+          window.flutter_inappwebview.callHandler('fetchResult', {
+            requestId: requestId,
             ok: true,
             status: response.status,
             statusText: response.statusText,
@@ -394,15 +418,11 @@ document.close();
             body: bodyData,
             isBase64: false
           });
-
-          window.flutter_inappwebview.callHandler('fetchResult', {
-            requestId: requestId,
-            result: result
-          });
         } catch (e) {
           window.flutter_inappwebview.callHandler('fetchResult', {
             requestId: requestId,
-            result: JSON.stringify({ok: false, error: e.toString()})
+            ok: false,
+            error: e.toString()
           });
         } finally {
           if (window.__fluxdoFetchAborters) {
@@ -450,7 +470,7 @@ document.close();
           const Duration(seconds: 30);
 
       final browserWaitWatch = Stopwatch()..start();
-      final resultStr = await completer.future.timeout(
+      final responseData = await completer.future.timeout(
         timeout,
         onTimeout: () {
           _pendingRequests.remove(requestId);
@@ -465,8 +485,7 @@ document.close();
       browserWaitWatch.stop();
       browserWaitElapsed = browserWaitWatch.elapsed;
 
-      final responseData = jsonDecode(resultStr) as Map<String, dynamic>;
-
+      // D5: handler 已把 JS 对象解析成 Map，这里不再 `jsonDecode`。
       if (responseData['ok'] != true) {
         throw DioException(
           requestOptions: options,
@@ -532,6 +551,9 @@ document.close();
       bridgeStats.textResponseBytes += bodyContent.length;
       bridgeStats.totalMs += totalWatch.elapsedMilliseconds;
       bridgeStats.jsEvalMs += jsEvalElapsed.inMilliseconds;
+      // D5: 本次响应体走的是「平级字段」新路径，省下了旧路径的整包二次转义。
+      bridgeStats.textBodyUnescaped++;
+      bridgeStats.textBodyUnescapedBytes += bodyContent.length;
 
       return ResponseBody.fromString(
         bodyContent,
@@ -705,7 +727,8 @@ document.close();
           } else {
             window.flutter_inappwebview.callHandler('fetchResult', {
               requestId: requestId,
-              result: JSON.stringify({ok: false, error: String(e)})
+              ok: false,
+              error: String(e)
             });
           }
         } finally {
