@@ -1959,3 +1959,90 @@ push `98f27565` + `483a18f1`（`APP_VERSION_SUFFIX` 017→**018**）→ **#60**�
    可与 D13 排队数据交叉判读：若并发被闸门限住但发热仍在，
    说明单次在飞成本（含跨桥批数）才是主项 → D14 方向正确。
 3. SS 接管内置浏览器方向与主线轮次交替。
+
+## 2026-10-15 01:00 CST — D15 活跃发热归因速判
+- 前置核对：#73 `226c36f9` success + Release `ios14-test-73` 已出；#72/#71 均 success，无未修复 failure。
+- 排查（先证据）：帧监控 release 默认不跑、日志内存缓冲、DoH 解析有 TTL 缓存+socket 复用、
+  iOS14.8 WebView 未进网关（MissingPluginException）→ 均非活跃发热主因。
+- 改动：`webview_bridge_diagnostics.dart` 加派生 getter `activeLoadVerdict`（零开销速判）；
+  诊断页展示速判行 + JSON report 增 `imageResponseBytes`/`activeLoadVerdict`；新增 5 个判据用例。
+- 本地：dart format 3 文件 0 changed exit 0；判据分支独立脚本复刻跑通。
+- commit `6e18e87a` + `c6843a49`；APP_VERSION_SUFFIX 028→029；触发 run #74（in_progress）。
+- 下一步：核对 #74 出包；实机刷帖看 D15 速判定位真凶（桥 vs 渲染/解码/DoH 出口）。
+
+## 2026-10-15 02:00 CST — D16 桥单位成本速判
+- 前置核对：#74 `c6843a49` success + Release `ios14-test-74` 已出；#73/#72/#71/#70 均 success，无未修复 failure。
+- 判断：D15 只答「桥搬了多少」，无法区分「字节总量」与「每请求固定税」。老板实测刷帖仍热 → 需单位成本判据。
+- 改动：`webview_bridge_diagnostics.dart` 加派生 getter `bridgeCostVerdict`（零采样、零新增开销），
+  三档阈值 250ms/125ms + 最少 8 样本；诊断页展示 + JSON report 增 `bridgeCostVerdict`/`avgInFlightMs`；
+  新增 5 个判据用例。未触碰任何 WebView 挂起/暂停 API。
+- 本地：dart format 3 文件 0 changed exit 0；判据分支独立脚本（含边界）跑通。
+- commit `84ab8ca6`；APP_VERSION_SUFFIX 029→030；触发 run #75。
+- 下一步：核对 #75 出包；实机刷帖看 D16——判「固定税主导」则做走桥请求条数瘦身。
+- ⚠️ run #75 = ❌ failure：step8 报 `webview_bridge_diagnostics.dart:321 Undefined name 'WebViewBridgeProbe'`
+  （D16 引用了未 import 的类，且 probe 反向 import diagnostics 会成环）。
+- 修复 commit `a47bc69c`：去掉跨文件引用，判据只用 totalMs/totalRequests/jsEvalMs；
+  本地 `dart analyze --fatal-infos webview_bridge_diagnostics.dart` = No issues found ✅；
+  dart format 51 文件 0 changed exit 0。重触发 → run #76。
+- 教训：新增对其它诊断类的引用前先确认已 import；本地必跑 dart analyze --fatal-infos。
+
+## 2026-10-15 03:00 CST — D17 桥固定税拆解（回答「税花在哪」）
+- 前置核对：#76 `a47bc69c` success（D16 修复生效）；#75 failure 已由 #76 修复，
+  无未修复 failure；#74/#73/#72 均 success。
+- 判断：D16 只答「桥单位成本贵不贵」，判贵了也不知道砍哪段。老板实测刷帖仍热，
+  需把每请求耗时拆成三段定位靶点。
+- 改动（纯累加/派生，零采样、零新增运行时开销、不碰任何 WebView 挂起 API）：
+  - `webview_bridge_diagnostics.dart`：新增 `cookiePrepMs`/`browserWaitMs`/`cookieBackSyncMs`
+    三个累加字段 + `bridgeTaxBreakdownVerdict` 派生 getter（三段占比 + 主导段判定，
+    阈值 `bridgeTaxDominantRatio=50`）；reset 清零。
+  - `webview_http_adapter.dart`：`_recordTimings` 里把 cookiePrep/browserWait/cookieBackSync
+    三段耗时累加进 diagnostics（原本只写 per-request 日志字段，未聚合）。
+  - `ios14_network_diagnostics_page.dart`：展示 D17 速判行 + JSON report 增 4 字段。
+  - `test/.../webview_bridge_coalesce_test.dart`：新增 D17 判据 6 个用例。
+- 本地：dart format 4 文件 0 changed exit 0；判据分支独立脚本复刻跑通（含 sum=0 边界）✅；
+  `dart analyze --fatal-infos` 对 diagnostics/test 两文件 No issues（adapter/page 因 2 核 OOM 崩溃，非代码问题）。
+- commit `affbc514`；APP_VERSION_SUFFIX 030→031；触发 run #77（in_progress）。
+- 下一步：核对 #77 出包；实机刷帖看 D17 三段拆解——cookie 主导→砍 sweepAll；
+  JS 主导→砍脚本体积/调用次数；等浏览器主导→转查 DoH 出口/渲染。
+
+## 2026-10-15 04:00 CST — D18 走桥请求脚本瘦身（砍每请求 JS 解析固定税）
+- 前置核对：#77 `affbc514` success + Release `ios14-test-77` 已出；#76 success；
+  #75 failure 已由 #76 修复，无未修复 failure。
+- 判断：D15/16/17 诊断侧已补齐（负载量/单位成本/成本拆解），但老板实测仍热 →
+  需真正动手砍 D17 拆出的固定税。代码证据：每个走桥请求的 JS 脚本都重复内联
+  与请求无关的 abort 辅助声明（`__fluxdoFetchAborters` + `__fluxdoAbortFetch`
+  函数体 6 行），幂等却每请求重解析一遍 → 抬高 D17「JS 调用」段固定税。
+- 改动（零语义变化，不碰 WebView 挂起 API）：
+  - `webview_http_adapter.dart` 新增 `_installFetchHelpers(controller)`，
+    `initialize()` 在 bootstrap 之后一次性把两个 abort 辅助装到 window。
+  - 文本路径脚本 + 二进制流路径脚本：删掉重复的 `__fluxdoAbortFetch` 函数体声明，
+    只保留 `__fluxdoFetchAborters = ... || {}` 一行兜底。
+  - 安装失败只记日志，abort 退化为 no-op（`_abortWebViewFetch` 有存在性守卫），
+    fetch 的 cookie/凭据/CF 指纹路径完全不变（过盾不受影响），不会白屏。
+- 本地：dart format 1 文件 0 changed exit 0 ✅；dart analyze 因 2 核 OOM 崩溃
+  （历史已知环境问题，非代码问题）；结构核对 `__fluxdoAbortFetch` 声明 3→1。
+- commit `a4f8ac9c`；APP_VERSION_SUFFIX 031→032；触发 run #78（in_progress）。
+- 下一步：核对 #78 出包；实机刷帖看 D17 的 `jsEvalMs` 是否下降（若 D17 判 JS 主导，
+  本改动即直接命中靶点）。SS 接管方向与主线交替。
+
+## 2026-10-15 04:00 CST — D19：同源图片分流做成诊断页运行时 A/B 开关
+- 前置核对：#78 `a4f8ac9c` success，Release `ios14-test-78` 已出（版本 0.2.28.032）；
+  #77 success；#75/76 已处理，无未修复 failure，可推进。
+- 判断：上轮已把 D2「同源图片分流」静态开关提升为 service 运行时 ValueNotifier 并
+  接线 platform_adapter 走桥判据，但**诊断页只有监听、无 A/B 切换 UI（半成品）**。
+  图片是活跃刷帖时最大走桥负载（JS fetch + 分块 base64 跨桥回传），分流到原生 Dio
+  是降活跃发热的直接命中点。本轮补齐 SwitchListTile 让实机即切即做 A/B。
+- 改动（零行为变化基线，不碰 WebView 挂起 API；默认 true=分流开启，行为同旧版）：
+  - `webview_adapter_settings_service.dart`：新增 imageNativeRoutingNotifier(true)/
+    imageNativeRoutingEnabled getter/setImageNativeRouting()。
+  - `platform_adapter.dart`：走桥判据改用 service 动态开关，删旧顶层静态 bool。
+  - `ios14_network_diagnostics_page.dart`：同源图片分流说明下方加 SwitchListTile，
+    initState/dispose 监听 notifier 驱动刷新。
+  - `ios14-test.yml`：APP_VERSION_SUFFIX 032→033。
+- 本地：dart format 3 文件 0 changed exit 0 ✅；dart analyze 因 2 核 OOM 崩溃
+  （历史已知环境问题）；引用一致性核实（page UI/page 监听/platform_adapter 三处
+  与 service 定义+import 全部匹配）。
+- commit `见下`；触发 workflow。
+- 下一步：核对本 run 出包；实机做 D2 A/B（先关分流刷帖对比，再开分流对比发热/
+  图片加载/CF 403）；A/B 证实省热且不过盾则固化默认，若 403 则回退并写明数据。
+  SS 接管方向与主线交替。

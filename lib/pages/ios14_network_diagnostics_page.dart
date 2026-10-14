@@ -14,6 +14,7 @@ import '../services/network/doh/doh_route_diagnostics.dart';
 import '../services/network/doh/network_settings_service.dart';
 import '../services/network/proxy/gateway_upstream.dart';
 import '../services/network/proxy/proxy_settings_service.dart';
+import '../services/network/webview/webview_adapter_settings_service.dart';
 
 /// 把 [NetworkSettingsService.webViewProxyState] 的机器值翻成一句人话。
 ///
@@ -55,6 +56,8 @@ class _Ios14NetworkDiagnosticsPageState
     super.initState();
     _settings.notifier.addListener(_changed);
     _settings.isApplying.addListener(_changed);
+    WebViewAdapterSettingsService.instance.imageNativeRoutingNotifier
+        .addListener(_changed);
   }
 
   void _changed() {
@@ -65,6 +68,8 @@ class _Ios14NetworkDiagnosticsPageState
   void dispose() {
     _settings.notifier.removeListener(_changed);
     _settings.isApplying.removeListener(_changed);
+    WebViewAdapterSettingsService.instance.imageNativeRoutingNotifier
+        .removeListener(_changed);
     super.dispose();
   }
 
@@ -322,6 +327,20 @@ class _Ios14NetworkDiagnosticsPageState
               '同源图片已分流原生直连：${_bridge.imageRoutedNative} 次'
               '（D2：这些请求不再走 JS fetch + 分块回传的桥路径）',
             ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('同源图片走原生直连（D2 A/B）'),
+            subtitle: const Text(
+              '开启=图片分流到原生 Dio（省桥负载）；若刷帖出现图片变糊/CF 拦截，关掉即回到走桥旧行为。运行时即切即生效。',
+            ),
+            value: WebViewAdapterSettingsService
+                .instance
+                .imageNativeRoutingEnabled,
+            onChanged: (value) => setState(
+              () => WebViewAdapterSettingsService.instance
+                  .setImageNativeRouting(value),
+            ),
+          ),
           Text(
             '响应字节：共 ${_bridge.totalResponseBytes}B'
             '（文本 ${_bridge.textResponseBytes}B / 二进制流 ${_bridge.streamResponseBytes}B）',

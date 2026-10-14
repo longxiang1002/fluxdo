@@ -33,6 +33,22 @@ class WebViewAdapterSettingsService {
   /// 持久化兼容模式或会话临时兼容模式任一开启时均为 true。
   final ValueNotifier<bool> effectiveNotifier = ValueNotifier(false);
 
+  /// D2：同源静态图片是否分流到原生 Dio 直连（默认开启）。
+  ///
+  /// 这是活跃刷帖时体量最大的走桥负载（图片经 JS fetch + 分块跨桥回传），
+  /// 分流到原生栈可显著削减桥负载。默认 true；若实测 CF 403/拦截率升高，
+  /// 可在诊断页一键切回「同源图片走桥」做 A/B，无需改代码。
+  /// 仅影响 `resourceKindImage` 分流分支，不动 API/写请求的桥路由。
+  final ValueNotifier<bool> imageNativeRoutingNotifier = ValueNotifier(true);
+
+  /// 当前同源图片是否走原生 Dio 直连。
+  bool get imageNativeRoutingEnabled => imageNativeRoutingNotifier.value;
+
+  /// 设置同源图片分流开关（诊断页 A/B 试验用，运行时可切换）。
+  void setImageNativeRouting(bool value) {
+    imageNativeRoutingNotifier.value = value;
+  }
+
   SharedPreferences? _prefs;
 
   /// 用户持久化设置是否开启。

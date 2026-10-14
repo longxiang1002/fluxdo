@@ -458,13 +458,6 @@ class _GatewayAdapterWrapper implements HttpClientAdapter {
   }
 }
 
-/// D2: 同源静态图片是否分流到原生 Dio 直连（默认开启）。
-///
-/// 置为 false 即整体回退到「同源图片走 WebView 桥」的旧行为，用于实测
-/// CF 403/拦截率升高时的一行回退。仅影响 [WebViewHttpAdapter.resourceKindImage]
-/// 分支，不动 API/写请求的桥路由。
-bool imageNativeRoutingEnabled = true;
-
 /// 判断请求本身是否能由 WebView 适配器承载，不考虑当前兼容模式开关。
 /// 用于 CF 恢复在弹出兼容提示前确认该请求确实可以被浏览器网络栈接管。
 bool requestCanUseWebViewAdapter(RequestOptions options) {
@@ -499,7 +492,7 @@ bool requestCanUseWebViewAdapter(RequestOptions options) {
     // 可回退：`skipWebViewAdapter` 仍是最高优先级的强制原生开关；
     // 若实测出现 CF 403/拦截率升高，把 [imageNativeRoutingEnabled] 置回 false
     // 即可恢复「同源图片走桥」的旧行为（一行回退，无需改调用方）。
-    if (imageNativeRoutingEnabled) {
+    if (WebViewAdapterSettingsService.instance.imageNativeRoutingEnabled) {
       WebViewBridgeDiagnostics.instance.imageRoutedNative++;
       return false;
     }
