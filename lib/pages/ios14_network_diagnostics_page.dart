@@ -191,6 +191,16 @@ class _Ios14NetworkDiagnosticsPageState
       'imageResponseBytes': s.imageResponseBytes,
       'activeLoadVerdict': s.activeLoadVerdict,
       'bridgeCostVerdict': s.bridgeCostVerdict,
+      'bridgeTaxBreakdownVerdict': s.bridgeTaxBreakdownVerdict,
+      'avgCookiePrepMs': s.totalRequests == 0
+          ? 0
+          : s.cookiePrepMs ~/ s.totalRequests,
+      'avgBrowserWaitMs': s.totalRequests == 0
+          ? 0
+          : s.browserWaitMs ~/ s.totalRequests,
+      'avgCookieBackSyncMs': s.totalRequests == 0
+          ? 0
+          : s.cookieBackSyncMs ~/ s.totalRequests,
       'avgInFlightMs': WebViewBridgeProbe.instance.averageInFlightMs,
       'requestBodyBase64': s.requestBodyBase64,
       'requestBodyStreamBridge': s.requestBodyStreamBridge,
@@ -294,6 +304,11 @@ class _Ios14NetworkDiagnosticsPageState
           if (_bridge.bridgeCostVerdict != null)
             Text(
               '桥单位成本速判（D16）：${_bridge.bridgeCostVerdict}',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          if (_bridge.bridgeTaxBreakdownVerdict != null)
+            Text(
+              '桥固定税拆解（D17）：${_bridge.bridgeTaxBreakdownVerdict}',
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
           Text(

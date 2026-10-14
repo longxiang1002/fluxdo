@@ -121,4 +121,70 @@ void main() {
       expect(stats.bridgeCostVerdict, isNull);
     });
   });
+
+  group('D17 桥固定税拆解', () {
+    test('样本不足时不冒充结论', () {
+      stats.apiGet = 3;
+      stats.totalMs = 900;
+      stats.cookiePrepMs = 600;
+      expect(stats.bridgeTaxBreakdownVerdict, isNull);
+    });
+
+    test('cookie 准备主导 → 指向边界同步', () {
+      stats.apiGet = 10;
+      stats.totalMs = 3000;
+      stats.cookiePrepMs = 2000; // 平均 200ms
+      stats.jsEvalMs = 300; // 平均 30ms
+      stats.browserWaitMs = 400; // 平均 40ms
+      final verdict = stats.bridgeTaxBreakdownVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('主导段 = cookie 准备'));
+      expect(verdict, contains('cookie 准备 200ms'));
+    });
+
+    test('JS 调用主导 → 指向脚本瘦身', () {
+      stats.apiGet = 10;
+      stats.totalMs = 3000;
+      stats.cookiePrepMs = 100;
+      stats.jsEvalMs = 2000; // 平均 200ms
+      stats.browserWaitMs = 300;
+      final verdict = stats.bridgeTaxBreakdownVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('主导段 = JS 调用'));
+    });
+
+    test('等浏览器主导 → 指出桥非主因', () {
+      stats.apiGet = 10;
+      stats.totalMs = 5000;
+      stats.cookiePrepMs = 100;
+      stats.jsEvalMs = 200;
+      stats.browserWaitMs = 4000; // 平均 400ms
+      final verdict = stats.bridgeTaxBreakdownVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('主导段 = 等浏览器返回'));
+    });
+
+    test('三段均衡 → 不押单段', () {
+      stats.apiGet = 10;
+      stats.totalMs = 3000;
+      stats.cookiePrepMs = 700;
+      stats.jsEvalMs = 700;
+      stats.browserWaitMs = 700;
+      final verdict = stats.bridgeTaxBreakdownVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('三段均衡'));
+    });
+
+    test('reset 后拆解回到无结论', () {
+      stats.apiGet = 10;
+      stats.totalMs = 3000;
+      stats.cookiePrepMs = 2000;
+      expect(stats.bridgeTaxBreakdownVerdict, isNotNull);
+      stats.reset();
+      expect(stats.bridgeTaxBreakdownVerdict, isNull);
+      expect(stats.cookiePrepMs, 0);
+      expect(stats.browserWaitMs, 0);
+      expect(stats.cookieBackSyncMs, 0);
+    });
+  });
 }

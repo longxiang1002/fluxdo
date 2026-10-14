@@ -60,6 +60,22 @@ class WebViewBridgeDiagnostics {
   int totalMs = 0;
   int jsEvalMs = 0;
 
+  /// D17: 活跃发热「固定税拆解」——把 [totalMs] 拆成三段，回答
+  /// 「桥的固定税到底花在哪」。
+  ///
+  /// 动机（2026-10-13 深夜重定位）：D16 只能判「桥单位成本高不高」，
+  /// 判高了也不知道该砍哪一段。老板实测刷帖仍热，需要把每请求耗时拆成
+  /// 「cookie 准备 / JS evaluate / 等浏览器返回」三段，才能确定优化靶点：
+  ///   - cookiePrep 主导 → 继续砍 sweepAll / 边界同步（D2/D3/D4 方向）；
+  ///   - jsEval 主导     → 砍 JS 脚本体积与跨语言调用次数；
+  ///   - browserWait 主导→ 桥不是主因，转查 DoH 出口 / 网络往返 / 渲染。
+  ///
+  /// 纯累加整数，零采样、零新增运行时开销；三段之和略小于 [totalMs]
+  /// （差值 = Dart 侧解析/回传等未单独计时的部分）。
+  int cookiePrepMs = 0;
+  int browserWaitMs = 0;
+  int cookieBackSyncMs = 0;
+
   /// 失败次数（异常/超时/非 2xx 由调用方判定），只计异常路径。
   int failed = 0;
 
@@ -351,6 +367,73 @@ class WebViewBridgeDiagnostics {
   /// D16: 成本速判所需的最少走桥请求数（避免冷启动样本污染均值）。
   static const int bridgeCostMinSamples = 8;
 
+  /// D17: 把桥的「固定税」拆成三段并指出主导段。
+  ///
+  /// 与 [bridgeCostVerdict] 的区别：后者只回答「贵不贵」，本 getter 回答
+  /// 「贵在哪」，直接给出优化靶点。判据只用已聚合的整数计数，纯派生、
+  /// 零采样、零新增运行时开销。返回 `null` 表示样本不足。
+  ///
+  /// 判据口径：三段之和（cookiePrep + jsEval + browserWait）作为分母，
+  /// 某段占比 ≥ [bridgeTaxDominantRatio] 即判为主导段。分母为 0（例如
+  /// 全部走的是不记 jsEval 的路径）时退化为按绝对值取最大段。
+  String? get bridgeTaxBreakdownVerdict {
+    if (totalRequests < bridgeCostMinSamples) return null;
+    final n = totalRequests;
+    final avgCookiePrep = cookiePrepMs ~/ n;
+    final avgJsEval = jsEvalMs ~/ n;
+    final avgBrowserWait = browserWaitMs ~/ n;
+    final avgTotal = totalMs ~/ n;
+    final sum = avgCookiePrep + avgJsEval + avgBrowserWait;
+
+    String pct(int part) => sum == 0 ? '—' : '${(part * 100 / sum).round()}%';
+
+    final head =
+        '桥固定税拆解：平均每请求 ${avgTotal}ms = '
+        'cookie 准备 ${avgCookiePrep}ms(${pct(avgCookiePrep)}) + '
+        'JS 调用 ${avgJsEval}ms(${pct(avgJsEval)}) + '
+        '等浏览器 ${avgBrowserWait}ms(${pct(avgBrowserWait)})';
+
+    // 主导段判定：优先按占比，分母为 0 时按绝对值。
+    final dominant =
+        avgCookiePrep >= avgJsEval && avgCookiePrep >= avgBrowserWait
+        ? 'cookie'
+        : (avgJsEval >= avgBrowserWait ? 'js' : 'browser');
+    final dominantMs = dominant == 'cookie'
+        ? avgCookiePrep
+        : (dominant == 'js' ? avgJsEval : avgBrowserWait);
+    final isDominant = sum == 0
+        ? false
+        : dominantMs * 100 >= sum * bridgeTaxDominantRatio;
+
+    if (!isDominant) {
+      return '$head。三段均衡，无单一段压倒性主导；'
+          '优化需多段同时收（cookie 同步降频 + JS 脚本瘦身），'
+          '或转查渲染/图片解码/DoH 出口。';
+    }
+
+    switch (dominant) {
+      case 'cookie':
+        return '$head。主导段 = cookie 准备（占 ${pct(avgCookiePrep)}）：'
+            '活跃发热的固定税主要花在 cookie 边界同步上。'
+            '下一步优先继续砍 sweepAll/边界同步（D2/D3/D4 方向），'
+            '而不是优化 JS 或传输。';
+      case 'js':
+        return '$head。主导段 = JS 调用（占 ${pct(avgJsEval)}）：'
+            '开销主要在跨语言 evaluateJavascript 与脚本体积。'
+            '下一步优先砍 JS 脚本长度与每请求调用次数（合并调用/预编译脚本）。';
+      default:
+        return '$head。主导段 = 等浏览器返回（占 ${pct(avgBrowserWait)}）：'
+            '时间花在 WebKit 网络往返而非跨桥搬运，桥本身不是活跃发热主因。'
+            '下一步转查 DoH 出口/上游往返/图片解码与渲染。';
+    }
+  }
+
+  /// D17: 某一段占「三段之和」多少即判为主导段（百分比）。
+  ///
+  /// 取 50：只有单段占到一半以上才算压倒性主导；低于此值说明三段均衡，
+  /// 不宜把优化全部押在单段上。
+  static const int bridgeTaxDominantRatio = 50;
+
   void reset() {
     imageSameOrigin = 0;
     imageOther = 0;
@@ -369,6 +452,9 @@ class WebViewBridgeDiagnostics {
     requestBodyDirect = 0;
     totalMs = 0;
     jsEvalMs = 0;
+    cookiePrepMs = 0;
+    browserWaitMs = 0;
+    cookieBackSyncMs = 0;
     failed = 0;
     cookieSweeps = 0;
     cookieSweepsSkipped = 0;

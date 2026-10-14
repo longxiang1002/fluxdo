@@ -1105,12 +1105,16 @@ document.close();
     Duration? cookieBackSync,
   }) {
     _setNetworkLogField(options, 'webViewTotalMs', total.inMilliseconds);
+    // D17: 把每请求耗时拆成三段聚合，供诊断页判读「固定税花在哪」。
+    // 纯累加整数，不新增任何采样/定时器，也不改变请求行为。
+    final stats = WebViewBridgeDiagnostics.instance;
     if (cookiePrep != null) {
       _setNetworkLogField(
         options,
         'webViewCookiePrepMs',
         cookiePrep.inMilliseconds,
       );
+      stats.cookiePrepMs += cookiePrep.inMilliseconds;
     }
     if (jsEval != null) {
       _setNetworkLogField(options, 'webViewJsEvalMs', jsEval.inMilliseconds);
@@ -1121,6 +1125,7 @@ document.close();
         'webViewBrowserWaitMs',
         browserWait.inMilliseconds,
       );
+      stats.browserWaitMs += browserWait.inMilliseconds;
     }
     if (cookieBackSync != null) {
       _setNetworkLogField(
@@ -1128,6 +1133,7 @@ document.close();
         'webViewCookieBackSyncMs',
         cookieBackSync.inMilliseconds,
       );
+      stats.cookieBackSyncMs += cookieBackSync.inMilliseconds;
     }
   }
 
