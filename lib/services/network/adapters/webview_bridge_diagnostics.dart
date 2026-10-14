@@ -318,14 +318,13 @@ class WebViewBridgeDiagnostics {
     if (totalRequests < bridgeCostMinSamples) return null;
     final avgMs = totalMs ~/ totalRequests;
     final avgJsEvalMs = jsEvalMs ~/ totalRequests;
-    final avgInFlight = WebViewBridgeProbe.instance.averageInFlightMs;
-    final inFlightText = avgInFlight == null
-        ? '未知'
-        : '${avgInFlight.toStringAsFixed(0)}ms';
+    // 注：这里只用本类已聚合的整数（totalMs/totalRequests/jsEvalMs），
+    // 不引用 WebViewBridgeProbe（那会引入跨文件依赖/环）。探针的
+    // averageInFlightMs 是另一套采样口径，诊断页单独展示即可。
 
     if (avgMs >= bridgeCostHeavyMs) {
       return '桥单位成本偏高：平均每请求 ${avgMs}ms'
-          '（其中 JS evaluate ${avgJsEvalMs}ms，含排队 ${inFlightText}），'
+          '（其中 JS evaluate ${avgJsEvalMs}ms），'
           '远超原生直连的几十 ms。活跃发热的主因大概率是「每个请求都在付'
           '跨语言+分块回传的固定税」，而非桥搬运的总字节量。'
           '下一步优先砍「走桥请求条数」（把更多只读/静态请求分流原生），'
@@ -333,12 +332,12 @@ class WebViewBridgeDiagnostics {
     }
     if (avgMs >= bridgeCostHeavyMs ~/ 2) {
       return '桥单位成本中等：平均每请求 ${avgMs}ms'
-          '（JS evaluate ${avgJsEvalMs}ms，含排队 ${inFlightText}）。'
+          '（JS evaluate ${avgJsEvalMs}ms）。'
           '桥有固定税但未到压倒性；若活跃发热仍在，需与渲染/解码/DoH 出口'
           '交叉排查，同时留意走桥请求条数是否偏高。';
     }
     return '桥单位成本良好：平均每请求 ${avgMs}ms'
-        '（JS evaluate ${avgJsEvalMs}ms，含排队 ${inFlightText}），'
+        '（JS evaluate ${avgJsEvalMs}ms），'
         '接近原生直连水平。桥本身不是活跃发热主因，'
         '应把排查重心转向渲染/图片解码/DoH 出口。';
   }
