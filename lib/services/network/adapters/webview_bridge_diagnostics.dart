@@ -189,6 +189,18 @@ class WebViewBridgeDiagnostics {
   /// 往返。每 +1 表示从活跃请求路径上摘掉了一整批边界同步。
   int cookieSweepsSkippedForImage = 0;
 
+  /// D9: 因「800ms 去抖窗口」被合并掉的**响应侧**边界回同步次数。
+  ///
+  /// 动机（活跃刷帖发热）：改前写请求（POST/PUT/…）走
+  /// `force: trustsWebViewSession || (method != 'GET' && method != 'HEAD')`，
+  /// 即**每个写请求都强制**跑一次 `_syncCriticalCookiesBackToJar` →
+  /// `readCookiesFromWebView`（iOS = `WKHTTPCookieStore.getAllCookies`
+  /// 全量枚举 + 跨 method channel 序列化）。活跃刷帖时点赞/回复/浏览上报
+  /// 等写请求密集，这是活跃负载下的固定 CPU 源。改后写请求与读请求共用
+  /// 同一 800ms 去抖快路径，窗口内到达的请求直接合并。每 +1 表示省下
+  /// 一次全量 WV cookie 枚举 + 边界同步。
+  int cookieBackSyncDeduped = 0;
+
   /// D2: 新的 WebView 会话建立/销毁时复位（新存储 = 需重新同步）。
   void resetCookieBoundarySync() {
     cookieBoundarySynced = false;
@@ -232,6 +244,7 @@ class WebViewBridgeDiagnostics {
     webViewPreservedOnConfigChange = 0;
     primingDeduped = 0;
     cookieSweepsSkippedForImage = 0;
+    cookieBackSyncDeduped = 0;
     _variantCounts.clear();
   }
 }

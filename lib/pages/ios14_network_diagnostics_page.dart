@@ -191,6 +191,7 @@ class _Ios14NetworkDiagnosticsPageState
       'webViewPreservedOnConfigChange': s.webViewPreservedOnConfigChange,
       'primingDeduped': s.primingDeduped,
       'cookieSweepsSkippedForImage': s.cookieSweepsSkippedForImage,
+      'cookieBackSyncDeduped': s.cookieBackSyncDeduped,
     };
   }
 
@@ -322,6 +323,12 @@ class _Ios14NetworkDiagnosticsPageState
               '只读图片跳过边界同步：${_bridge.cookieSweepsSkippedForImage} 次'
               '（D8：同源图片只读 cookie，不跑 sweepAll，'
               '省下 O(cookie 数) 次原生 method channel 往返）',
+            ),
+          if (_bridge.cookieBackSyncDeduped > 0)
+            Text(
+              '响应侧边界回同步去抖合并：${_bridge.cookieBackSyncDeduped} 次'
+              '（D9：写请求不再各自强制全量枚举 WV cookie，'
+              '与读请求共用 800ms 去抖窗口，省下全量 getAllCookies 枚举）',
             ),
           Text(
             '批量取数：${_bridge.cookieBatchCountCalls} 次调用'

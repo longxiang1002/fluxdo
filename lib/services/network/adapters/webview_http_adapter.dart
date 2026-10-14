@@ -530,10 +530,24 @@ document.close();
         );
         // 成功的 WebView 登录态请求本身就是服务端认可 session 的证明。
         // 失败/登出信号路径仍只同步非登录态 cookie，避免旧 _t 回灌。
+        //
+        // D9: 写请求（POST/PUT/…）不再**无条件**强制全量边界同步。
+        // 改前 `force: trustsWebViewSession || (method != 'GET' && method != 'HEAD')`
+        // 让每个写请求都绕过 800ms 去抖窗口，触发一次
+        // `readCookiesFromWebView`（iOS = `WKHTTPCookieStore.getAllCookies`
+        // 全量枚举 + 跨 method channel 序列化），活跃刷帖时点赞/回复/浏览
+        // 上报等写请求密集，这是活跃负载下的固定 CPU 源。
+        //
+        // 正确性：WV 侧 cookie 变化已由 [CookieStoreObserver] 的 500ms
+        // debounce（native `WKHTTPCookieStoreObserver` 推送）在请求路径之外
+        // 统一收敛；写请求的响应 cookie 并不比 observer 更早/更全。因此写
+        // 请求与读请求共用同一去抖快路径即可，不会漏掉任何 cookie 变化。
+        // 仅「服务端已确认登录态」这一强信号仍需 force（它决定 auth cookie
+        // 是否立即落 jar，不能延后）。
         final cookieBackSyncWatch = Stopwatch()..start();
         await _syncCriticalCookiesBackToJar(
           url,
-          force: trustsWebViewSession || (method != 'GET' && method != 'HEAD'),
+          force: trustsWebViewSession,
           requestGeneration: options.extra['_sessionGeneration'] as int?,
           excludeCookieNames: trustsWebViewSession
               ? null
@@ -1680,6 +1694,11 @@ document.close();
         if (active != null) {
           await active;
         }
+        // D9: 记录一次「因去抖窗口被合并」的边界回同步。
+        // 改前写请求会绕过这里，每个写请求各跑一次全量 WV cookie 枚举；
+        // 现在写请求也走此快路径，这个计数即本轮从活跃负载上摘掉的
+        // 全量枚举批次（含写请求贡献的部分）。
+        WebViewBridgeDiagnostics.instance.cookieBackSyncDeduped++;
         return;
       }
     }
