@@ -280,6 +280,14 @@ document.close();
       final cookieMode = _resolveCookieMode(options, shouldSyncAppCookies);
       final syncAppCookies = cookieMode == _WebViewCookieMode.sync;
       final prepareAppCookies = cookieMode != _WebViewCookieMode.none;
+      // D8: 同源静态图片（只读 cookie 模式）不需要「写回同步」语义，只需
+      // 一次轻量 prime 让 WV 拿到 jar 的 cookie 即可。改前这些请求每次都要
+      // 跑一遍完整 prepareAppCookies（prime + sweepAll），而 sweepAll 是
+      // O(cookie 数) 次原生 method channel 往返——活跃刷帖时图片请求占桥
+      // 负载大头，这是被平白背上的固定开销。这里让只读模式走轻量路径。
+      final isReadOnlyImageRequest =
+          cookieMode == _WebViewCookieMode.readOnly &&
+          options.extra[resourceKindExtraKey]?.toString() == resourceKindImage;
       final wantsBinaryStream =
           options.responseType == ResponseType.stream ||
           options.responseType == ResponseType.bytes;
@@ -296,6 +304,10 @@ document.close();
         //    sweep 反向同步)
         final cookiePrepWatch = Stopwatch()..start();
         try {
+          // D8: 只读图片请求走轻量 prime——prime() 自身幂等（已 prime 直接
+          // 短路），且不需要紧随其后的 sweepAll 边界清理。图片只读 cookie，
+          // 不会往 WV 侧写 cookie，因此不存在「变体清理」的需求；改前每次
+          // 图片请求都白跑一遍 sweepAll 的 O(cookie 数) 原生往返。
           await WebViewCookiePriming.instance.prime(url);
         } catch (e) {
           debugPrint('[WebViewAdapter] priming failed (continuing): $e');
@@ -322,6 +334,9 @@ document.close();
           } else {
             bridgeStats.cookieSweepsSkipped++;
           }
+        } else if (isReadOnlyImageRequest) {
+          // D8: 只读图片请求不跑 sweepAll（省下 O(cookie 数) 原生往返）。
+          bridgeStats.cookieSweepsSkippedForImage++;
         }
         cookiePrepWatch.stop();
         cookiePrepElapsed = cookiePrepWatch.elapsed;

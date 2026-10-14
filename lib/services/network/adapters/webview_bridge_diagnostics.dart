@@ -180,6 +180,15 @@ class WebViewBridgeDiagnostics {
     primingDeduped++;
   }
 
+  /// D8: 因「只读图片请求」而省下的 `sweepAll` 边界同步次数。
+  ///
+  /// 动机（活跃刷帖发热）：同源图片在桥上是只读 cookie 模式
+  /// （`cookieModeReadOnly`），从不往 WV 侧写 cookie，因此紧随 `prime()`
+  /// 之后的 `sweepAll()`（清理 WV 侧多余变体）对它们毫无意义。改前每个
+  /// 图片请求都要跑一遍 `sweepAll`——O(cookie 数) 次原生 method channel
+  /// 往返。每 +1 表示从活跃请求路径上摘掉了一整批边界同步。
+  int cookieSweepsSkippedForImage = 0;
+
   /// D2: 新的 WebView 会话建立/销毁时复位（新存储 = 需重新同步）。
   void resetCookieBoundarySync() {
     cookieBoundarySynced = false;
@@ -222,6 +231,7 @@ class WebViewBridgeDiagnostics {
     textBodyUnescapedBytes = 0;
     webViewPreservedOnConfigChange = 0;
     primingDeduped = 0;
+    cookieSweepsSkippedForImage = 0;
     _variantCounts.clear();
   }
 }

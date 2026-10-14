@@ -190,6 +190,7 @@ class _Ios14NetworkDiagnosticsPageState
       'textBodyUnescapedBytes': s.textBodyUnescapedBytes,
       'webViewPreservedOnConfigChange': s.webViewPreservedOnConfigChange,
       'primingDeduped': s.primingDeduped,
+      'cookieSweepsSkippedForImage': s.cookieSweepsSkippedForImage,
     };
   }
 
@@ -315,6 +316,12 @@ class _Ios14NetworkDiagnosticsPageState
               '重复 cookie 重灌去抖：${_bridge.primingDeduped} 次'
               '（D7：距上次 prime 不足 2s 的重复 priming 被短路，'
               '省下 O(cookie 数) 次原生 cookie 库往返）',
+            ),
+          if (_bridge.cookieSweepsSkippedForImage > 0)
+            Text(
+              '只读图片跳过边界同步：${_bridge.cookieSweepsSkippedForImage} 次'
+              '（D8：同源图片只读 cookie，不跑 sweepAll，'
+              '省下 O(cookie 数) 次原生 method channel 往返）',
             ),
           Text(
             '批量取数：${_bridge.cookieBatchCountCalls} 次调用'
