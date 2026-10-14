@@ -580,7 +580,7 @@ class SessionCookieSentinel {
     final after = await _writer.countCookiesByName(url, name);
     // D3: 把删除+重写后的最新计数写回缓存，供同一批里后续 name 的 sweep 参考；
     // 若该 name 之后又被重新 sweep，读到的就是这个已收敛的值。
-    stats.rememberVariantCount(name, after);
+    WebViewBridgeDiagnostics.instance.rememberVariantCount(name, after);
     if (after <= 1 || await _residualIsAcceptable(url, name, 1)) {
       _markSweepSuccess(name);
 
