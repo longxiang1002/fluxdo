@@ -261,6 +261,44 @@ class WebViewBridgeDiagnostics {
 
   int get totalResponseBytes => textResponseBytes + streamResponseBytes;
 
+  /// D15: 活跃发热归因速判——把桥侧计数压成一句可读结论，供「刷帖前后各看
+  /// 一次差值」时一眼判读「活跃期发热是否由桥负载主导」。
+  ///
+  /// 纯派生计算，不采样、不新增任何运行时开销；判据只用已在聚合的整数计数。
+  /// 返回 `null` 表示样本不足（尚无走桥请求），不冒充结论。
+  String? get activeLoadVerdict {
+    if (totalRequests == 0) return null;
+    // 桥侧是否仍在搬运大量图片字节：同源图片走桥次数 + 图片响应字节。
+    final imageOnBridge = imageSameOrigin;
+    final imageBytesOnBridge = imageResponseBytes;
+    // 已分流到原生直连的同源图片次数（D2）。
+    final imageOffloaded = imageRoutedNative;
+    final mb = totalResponseBytes / (1024 * 1024);
+    final bytesText = mb.toStringAsFixed(2);
+
+    if (imageOffloaded > imageOnBridge) {
+      // 图片大头已被分流，桥主要剩 API/文本。
+      if (totalResponseBytes < 2 * 1024 * 1024) {
+        return '桥负载已瘦身：图片分流 $imageOffloaded 次，'
+            '桥仅搬运 ${bytesText}MB（以 API/文本为主）。'
+            '若活跃发热仍在，真凶大概率不在桥，转查渲染/图片解码/DoH 出口。';
+      }
+      return '图片已分流 $imageOffloaded 次（走桥仅 $imageOnBridge 次），'
+          '但桥仍在搬运 ${bytesText}MB，其中图片字节 '
+          '${(imageBytesOnBridge / (1024 * 1024)).toStringAsFixed(2)}MB。'
+          '桥负载仍显著，可继续收紧并发闸门或核对分流是否被 CF 403 回退。';
+    }
+    if (imageBytesOnBridge > totalResponseBytes ~/ 2) {
+      return '桥负载由图片主导：图片字节 '
+          '${(imageBytesOnBridge / (1024 * 1024)).toStringAsFixed(2)}MB'
+          '占桥总量 ${bytesText}MB 的一半以上（走桥 $imageOnBridge 次，'
+          '分流 $imageOffloaded 次）。图片分流未覆盖到位，是活跃发热首选靶点。';
+    }
+    return '桥负载以 API/文本为主（共 ${bytesText}MB，图片字节 '
+        '${(imageBytesOnBridge / (1024 * 1024)).toStringAsFixed(2)}MB）。'
+        '若活跃发热仍在，桥不是主因，转查渲染/图片解码/DoH 出口。';
+  }
+
   void reset() {
     imageSameOrigin = 0;
     imageOther = 0;

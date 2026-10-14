@@ -188,6 +188,8 @@ class _Ios14NetworkDiagnosticsPageState
       'streamResponses': s.streamResponses,
       'streamResponseBytes': s.streamResponseBytes,
       'totalResponseBytes': s.totalResponseBytes,
+      'imageResponseBytes': s.imageResponseBytes,
+      'activeLoadVerdict': s.activeLoadVerdict,
       'requestBodyBase64': s.requestBodyBase64,
       'requestBodyStreamBridge': s.requestBodyStreamBridge,
       'requestBodyDirect': s.requestBodyDirect,
@@ -282,6 +284,11 @@ class _Ios14NetworkDiagnosticsPageState
           ),
           const Divider(height: 24),
           Text('网络桥开销画像（活跃负载）', style: Theme.of(context).textTheme.titleSmall),
+          if (_bridge.activeLoadVerdict != null)
+            Text(
+              '活跃发热归因速判（D15）：${_bridge.activeLoadVerdict}',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
           Text(
             '走桥请求总数：${_bridge.totalRequests}'
             '（图片同源 ${_bridge.imageSameOrigin} / 图片其他 ${_bridge.imageOther}'
