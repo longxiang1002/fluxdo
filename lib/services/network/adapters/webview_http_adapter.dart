@@ -200,6 +200,15 @@ class WebViewHttpAdapter implements HttpClientAdapter {
         await _writeBootstrapHtml(controller);
       }
 
+      // D18: 把「与具体请求无关」的 JS 辅助函数（abort 控制器表 + abort 函数）
+      // 在 WebView 就绪时一次性装好。改前每个走桥请求的脚本里都要重新声明
+      // 一遍 `window.__fluxdoFetchAborters` / `window.__fluxdoAbortFetch`，
+      // 这些声明与请求无关、且幂等；活跃刷帖时每请求多解析一段脚本，
+      // 直接抬高 D17 里「JS 调用」那一段的固定税。装一次即可，语义不变。
+      // 装失败不阻断初始化：请求脚本只保留 `|| {}` 兜底，abort 退化为 no-op
+      // （_abortWebViewFetch 本就有存在性守卫），不影响响应正确性。
+      await _installFetchHelpers(controller);
+
       _isInitialized = true;
       if (!initCompleter.isCompleted) {
         initCompleter.complete();
@@ -237,6 +246,36 @@ document.write($html);
 document.close();
 ''',
     );
+  }
+
+  /// D18: 一次性安装与请求无关的 JS 辅助函数。
+  ///
+  /// 只装「abort 控制器表」与「abort 函数」——它们此前被内联在每个走桥
+  /// 请求的脚本里重复声明（幂等但每次都要重新解析）。装到 window 上后，
+  /// 每个请求脚本只需 `window.__fluxdoFetchAborters[id] = controller`。
+  ///
+  /// 与请求行为无关、不触碰任何 WebView 挂起/暂停 API，也不改变 fetch
+  /// 语义（cookie/凭据/CF 指纹路径完全不变）。安装失败只记日志：请求脚本
+  /// 仍带 `|| {}` 兜底，abort 退化为 no-op，不会白屏。
+  Future<void> _installFetchHelpers(InAppWebViewController controller) async {
+    try {
+      await controller.evaluateJavascript(
+        source: '''
+        (function() {
+          window.__fluxdoFetchAborters = window.__fluxdoFetchAborters || {};
+          window.__fluxdoAbortFetch = window.__fluxdoAbortFetch || function(id) {
+            const controller = window.__fluxdoFetchAborters && window.__fluxdoFetchAborters[id];
+            if (controller) {
+              controller.abort();
+              delete window.__fluxdoFetchAborters[id];
+            }
+          };
+        })();
+      ''',
+      );
+    } catch (e) {
+      debugPrint('[WebViewAdapter] fetch helper install failed: $e');
+    }
   }
 
   String get _windowsBootstrapUrl => '${AppConstants.baseUrl}/robots.txt';
@@ -402,14 +441,11 @@ document.close();
       (async function() {
         const requestId = ${jsonEncode(requestId)};
         try {
+          // D18: abort 辅助函数（__fluxdoFetchAborters / __fluxdoAbortFetch）
+          // 已在 WebView 就绪时一次性装好，这里不再重复声明函数体——只保证
+          // 控制器表存在即可。装失败时 abort 退化为 no-op（_abortWebViewFetch
+          // 本就有 `if (window.__fluxdoAbortFetch)` 守卫），不影响响应正确性。
           window.__fluxdoFetchAborters = window.__fluxdoFetchAborters || {};
-          window.__fluxdoAbortFetch = window.__fluxdoAbortFetch || function(id) {
-            const controller = window.__fluxdoFetchAborters && window.__fluxdoFetchAborters[id];
-            if (controller) {
-              controller.abort();
-              delete window.__fluxdoFetchAborters[id];
-            }
-          };
 
           const controller = new AbortController();
           window.__fluxdoFetchAborters[requestId] = controller;
@@ -693,14 +729,8 @@ document.close();
         try {
           responsePort = await window.__fluxdoTakeBinaryResponsePort(requestId);
 
+          // D18: abort 辅助函数已一次性装好，这里只保证控制器表存在。
           window.__fluxdoFetchAborters = window.__fluxdoFetchAborters || {};
-          window.__fluxdoAbortFetch = window.__fluxdoAbortFetch || function(id) {
-            const controller = window.__fluxdoFetchAborters && window.__fluxdoFetchAborters[id];
-            if (controller) {
-              controller.abort();
-              delete window.__fluxdoFetchAborters[id];
-            }
-          };
 
           const controller = new AbortController();
           window.__fluxdoFetchAborters[requestId] = controller;
