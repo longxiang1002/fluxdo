@@ -299,6 +299,59 @@ class WebViewBridgeDiagnostics {
         '若活跃发热仍在，桥不是主因，转查渲染/图片解码/DoH 出口。';
   }
 
+  /// D16: 活跃发热「成本预算」速判——把桥的**单位成本**压成一句可读结论。
+  ///
+  /// 动机（2026-10-13 深夜重定位）：D15 的 [activeLoadVerdict] 只回答
+  /// 「桥搬了多少」，但老板实测 test-48 后**刷一会仍发热**。桥的绝对字节量
+  /// 可能不大（D15 判「桥负载已瘦身」），可如果**每个请求的平均耗时**远高于
+  /// 原生直连（原生 iOS 直连通常 30~80ms），说明真正的开销不是「搬了多少
+  /// 字节」，而是「每个请求都在付跨语言 + 分块回传的固定税」——活跃刷帖时
+  /// 请求密集，这份固定税被反复支付，才是活跃发热的主因。
+  ///
+  /// 判据只用已在聚合的整数计数（[totalMs] / [totalRequests] / 探针均值），
+  /// 纯派生、零采样、零新增运行时开销。返回 `null` 表示样本不足。
+  ///
+  /// 阈值依据：[bridgeCostHeavyMs] 取 250ms——原生直连的 3~8 倍，足以把
+  /// 「正常网络往返」与「跨桥固定税」区分开；[bridgeCostMinSamples] 取 8，
+  /// 避免一两个冷启动请求（含 WebView 初始化）把均值拉高后误判。
+  String? get bridgeCostVerdict {
+    if (totalRequests < bridgeCostMinSamples) return null;
+    final avgMs = totalMs ~/ totalRequests;
+    final avgJsEvalMs = jsEvalMs ~/ totalRequests;
+    final avgInFlight = WebViewBridgeProbe.instance.averageInFlightMs;
+    final inFlightText = avgInFlight == null
+        ? '未知'
+        : '${avgInFlight.toStringAsFixed(0)}ms';
+
+    if (avgMs >= bridgeCostHeavyMs) {
+      return '桥单位成本偏高：平均每请求 ${avgMs}ms'
+          '（其中 JS evaluate ${avgJsEvalMs}ms，含排队 ${inFlightText}），'
+          '远超原生直连的几十 ms。活跃发热的主因大概率是「每个请求都在付'
+          '跨语言+分块回传的固定税」，而非桥搬运的总字节量。'
+          '下一步优先砍「走桥请求条数」（把更多只读/静态请求分流原生），'
+          '而不是继续优化单次传输。';
+    }
+    if (avgMs >= bridgeCostHeavyMs ~/ 2) {
+      return '桥单位成本中等：平均每请求 ${avgMs}ms'
+          '（JS evaluate ${avgJsEvalMs}ms，含排队 ${inFlightText}）。'
+          '桥有固定税但未到压倒性；若活跃发热仍在，需与渲染/解码/DoH 出口'
+          '交叉排查，同时留意走桥请求条数是否偏高。';
+    }
+    return '桥单位成本良好：平均每请求 ${avgMs}ms'
+        '（JS evaluate ${avgJsEvalMs}ms，含排队 ${inFlightText}），'
+        '接近原生直连水平。桥本身不是活跃发热主因，'
+        '应把排查重心转向渲染/图片解码/DoH 出口。';
+  }
+
+  /// D16: 判定「桥单位成本偏高」的平均耗时阈值（毫秒）。
+  ///
+  /// 取 250ms：原生 iOS 直连通常 30~80ms，250ms 已是其 3~8 倍，
+  /// 足以把「正常网络往返」与「跨桥固定税」区分开，同时不会被偶发慢网误触。
+  static const int bridgeCostHeavyMs = 250;
+
+  /// D16: 成本速判所需的最少走桥请求数（避免冷启动样本污染均值）。
+  static const int bridgeCostMinSamples = 8;
+
   void reset() {
     imageSameOrigin = 0;
     imageOther = 0;

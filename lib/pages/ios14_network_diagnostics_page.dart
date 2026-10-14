@@ -190,6 +190,8 @@ class _Ios14NetworkDiagnosticsPageState
       'totalResponseBytes': s.totalResponseBytes,
       'imageResponseBytes': s.imageResponseBytes,
       'activeLoadVerdict': s.activeLoadVerdict,
+      'bridgeCostVerdict': s.bridgeCostVerdict,
+      'avgInFlightMs': WebViewBridgeProbe.instance.averageInFlightMs,
       'requestBodyBase64': s.requestBodyBase64,
       'requestBodyStreamBridge': s.requestBodyStreamBridge,
       'requestBodyDirect': s.requestBodyDirect,
@@ -287,6 +289,11 @@ class _Ios14NetworkDiagnosticsPageState
           if (_bridge.activeLoadVerdict != null)
             Text(
               '活跃发热归因速判（D15）：${_bridge.activeLoadVerdict}',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          if (_bridge.bridgeCostVerdict != null)
+            Text(
+              '桥单位成本速判（D16）：${_bridge.bridgeCostVerdict}',
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
           Text(
