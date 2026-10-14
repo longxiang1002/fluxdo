@@ -8,6 +8,7 @@ import '../services/diagnostics/ios14_diagnostics.dart';
 import '../services/network/adapters/apple_transport_policy.dart';
 import '../services/network/adapters/platform_adapter.dart';
 import '../services/network/adapters/webview_bridge_diagnostics.dart';
+import '../services/network/adapters/webview_bridge_probe.dart';
 import '../services/network/doh/doh_route_diagnostics.dart';
 import '../services/network/doh/network_settings_service.dart';
 import '../services/network/proxy/gateway_upstream.dart';
@@ -41,6 +42,7 @@ class _Ios14NetworkDiagnosticsPageState
   final _routes = DohRouteDiagnostics.instance;
   final _proxyService = ProxySettingsService.instance;
   final _bridge = WebViewBridgeDiagnostics.instance;
+  final _probe = WebViewBridgeProbe.instance;
   final _diag = Ios14Diagnostics.instance;
   bool _testing = false;
   String _dnsResult = '尚未测试';
@@ -357,6 +359,35 @@ class _Ios14NetworkDiagnosticsPageState
           Text(
             '变体计数缓存复用：${_bridge.variantCountCacheHits} 次'
             '（D3：同一批 sweep 内复用刚读到的计数，省掉重复的全量枚举）',
+          ),
+          const Divider(height: 24),
+          Text('活跃期桥负载探针（D12）', style: Theme.of(context).textTheme.titleSmall),
+          Text(
+            '并发峰值：${_probe.concurrencyPeak} 个同时未完成的桥请求'
+            '（当前在飞 ${_probe.inFlight}）',
+          ),
+          Text(
+            '桥忙碌占比：${switch (_probe.busyRatio) {
+              null => "尚未采样",
+              final r => "${(r * 100).toStringAsFixed(0)}%"
+                  '（有请求在飞 ${_probe.concurrencySamples} 秒 / 空闲 ${_probe.idleSamples} 秒）',
+            }}',
+          ),
+          Text(
+            '平均单次桥请求在飞时长：'
+            '${_probe.averageInFlightMs == null ? "尚无完成请求" : "${_probe.averageInFlightMs!.toStringAsFixed(0)}ms"}'
+            '（完成 ${_probe.completedRequests} 次，累计 ${_probe.inFlightMs}ms）',
+          ),
+          const Text(
+            '判读：并发峰值高且忙碌占比高 → 桥是活跃期主要 CPU 源，值得做并发限流；'
+            '平均在飞时长若远高于原生直连（几十 ms 级），说明每个请求都在付跨语言 + '
+            '分块回传的固定税。',
+          ),
+          OutlinedButton(
+            onPressed: () => setState(() {
+              _probe.reset();
+            }),
+            child: const Text('重置活跃期桥负载探针（刷帖前清零）'),
           ),
           const Text(
             '说明：边界同步（sweepAll）会对每个 cookie 名做多次原生 cookie 库往返，'

@@ -18,6 +18,7 @@ import '../../windows_webview_environment_service.dart';
 import '../webview/webview_adapter_settings_service.dart';
 import 'adapter_log_metadata.dart';
 import 'webview_bridge_diagnostics.dart';
+import 'webview_bridge_probe.dart';
 
 /// WebView HTTP 适配器
 ///
@@ -251,6 +252,8 @@ document.close();
   ) async {
     setRequestAdapterLogName(options, 'webview');
     _activeFetches++;
+    // D12: 活跃期并发/耗时探针（只计数，不改行为）。
+    WebViewBridgeProbe.instance.onRequestStart();
 
     final totalWatch = Stopwatch()..start();
     Duration? cookiePrepElapsed;
@@ -594,6 +597,8 @@ document.close();
       rethrow;
     } finally {
       _activeFetches--;
+      // D12: 记录本次在飞时长并收敛并发计数。
+      WebViewBridgeProbe.instance.onRequestEnd(totalWatch.elapsed);
       if (_activeFetches == 0 && _disposeWhenIdle) {
         close(force: false);
       }
