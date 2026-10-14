@@ -1605,3 +1605,357 @@ push `98f27565` + `483a18f1`（`APP_VERSION_SUFFIX` 017→**018**）→ **#60**�
 1. 等本轮 run → 确认 Release + IPA 直链。
 2. 老板实机验证 D6（诊断页看计数）+ 活跃发热变化。
 3. 下一轮继续找活跃负载发热源。
+
+---
+
+## 2026-10-14 16:00 CST — D7：重复 cookie 重灌去抖（活跃负载削峰）
+
+### 0) CI 前置核对
+- **#63** `6856d6d5` = ✅ success，Release **`ios14-test-63`** 已出（D6，`0.2.28.020`），
+  IPA：`https://github.com/longxiang1002/fluxdo/releases/download/ios14-test-63/fluxdo-ios14-test-63-6856d6d5.ipa`
+- **#62** = ✅ success；**#61** = ✅ success → 无未修复 failure、无缺 Release。
+
+### 1) 证据
+- `cf_clearance_refresh_service.dart:345` 与 `webview_session_cookie_refresh_service.dart:317`：
+  每次重建隐藏 WebView 前都 `WebViewCookiePriming.instance.invalidate()` + `await prime(baseUrl)`。
+- `webview_cookie_priming.dart` 改前：`invalidate()` 只置 `_isPrimed=false`；`prime()` 唯一短路是 `if (_isPrimed) return`。
+  → 活跃刷帖时 CF 持续触发刷新，每次刷新都强制一次全量 prime。
+- `_primeInternal` 每个 cookie 走 `_writeCookieWithVariantCleanup`：先 `sweep(delete)` 再 `setRawCookie`
+  再 `countCookiesByName`，即 **O(cookie 数) 次原生 cookie 库往返**（iOS = `WKHTTPCookieStore` 全量枚举 + 跨语言序列化）。
+- → 活跃负载下的固定 CPU 源：CF 刷新频率 × 全量 cookie 重灌成本。
+
+### 2) 改动
+- `webview_cookie_priming.dart`：新增 `_lastPrimeCompletedAt` + `_primeDedupWindow = 2s`；
+  `prime()` 在 `_isPrimed` 短路后新增「距上次成功 prime 不足窗口 → 直接短路」分支（`markPrimingDeduped()`）；
+  `_primeInternal` 成功时记录完成时间；`invalidate()` 一并清时间戳（显式失效必须允许真 prime）。
+- `webview_bridge_diagnostics.dart`：新增 `primingDeduped` 计数 + `markPrimingDeduped()`，`reset()` 复位。
+- `ios14_network_diagnostics_page.dart`：snapshot + UI 显示「重复 cookie 重灌去抖：N 次」。
+- 禁令遵守：无 pauseTimers/resumeTimers、无滚动挂起、不阻塞 JS。
+
+### 3) 本地验证（CI 同款 Dart 3.12.0）
+- `dart format --output=none --set-exit-if-changed`：3 files **0 changed，exit 0** ✅。
+
+### 4) 提交与 CI
+- commit `d6f89f87`，push `6856d6d5..d6f89f87`。
+- `APP_VERSION_SUFFIX` 020 → **021**。
+- 触发 workflow（HTTP 204）→ run 号见下轮核对。
+
+### 下一步
+1. 核对本轮 run → 确认 Release `ios14-test-<n>`（`0.2.28.021`）+ IPA 直链。
+2. 老板实机：诊断页「重置桥统计」→ 刷帖 → 看「重复 cookie 重灌去抖 N 次」+ 发热变化。
+3. 下一轮继续找活跃负载发热源（候选：CF 刷新 WebView 重建频率、桥并发上限）。
+
+---
+
+## 2026-10-14 18:00 CST — D8：只读图片请求跳过 sweepAll 边界同步（活跃负载削峰）
+
+### 0) CI 前置核对
+- **#64** `d6f89f87` = ✅ success，Release **`ios14-test-64`** 已出（D7，`0.2.28.021`），
+  IPA：`https://github.com/longxiang1002/fluxdo/releases/download/ios14-test-64/fluxdo-ios14-test-64-d6f89f87.ipa`
+- **#63** = ✅ success；**#62** = ✅ success → 无未修复 failure、无缺 Release。
+
+### 1) 证据
+- `dio_http_client.dart:131-136 / 210-215`：主域图片（`send` / `fetchBytes`）打
+  `resourceKindImage` + `cookieModeReadOnly`。
+- `webview_http_adapter.dart:288` 改前：`prepareAppCookies = cookieMode != none`，
+  只读图片也进完整 prepare 块；只读图片从不往 WV 侧写 cookie，`sweepAll` 对其无意义。
+- 活跃刷帖时同源图片是桥负载大头，每张图都背一次 cookie 准备开销面。
+
+### 2) 改动
+- `webview_http_adapter.dart`：新增 `isReadOnlyImageRequest`（readOnly + image）；
+  prepare 块内 `else if (isReadOnlyImageRequest)` 显式跳过 sweepAll + 计数。
+- `webview_bridge_diagnostics.dart`：新增 `cookieSweepsSkippedForImage` + reset 复位。
+- `ios14_network_diagnostics_page.dart`：snapshot + UI「只读图片跳过边界同步：N 次」。
+- 禁令遵守：无 pauseTimers/resumeTimers、无滚动挂起、不阻塞 JS。
+
+### 3) 本地验证（CI 同款 Dart 3.12.0）
+- `dart format --output=none --set-exit-if-changed`：45 files **0 changed，exit 0** ✅。
+- `dart analyze`：本机内存不足致 analysis server 崩溃（环境限制）；formatter 解析三文件均通过。
+
+### 4) 提交与 CI
+- commit `33741cac`，push `d6f89f87..33741cac`。
+- `APP_VERSION_SUFFIX` 021 → **022**。
+- 触发 workflow（HTTP 204）→ run 号见下轮核对。
+
+### 下一步
+1. 核对本轮 run → 确认 Release `ios14-test-<n>`（`0.2.28.022`）+ IPA 直链。
+2. 老板实机：诊断页「重置桥统计」→ 刷帖 → 看「只读图片跳过边界同步 N 次」+ 发热变化。
+3. 下一轮继续找活跃负载发热源（候选：CF 刷新 WebView 重建频率、桥并发上限）。
+
+---
+
+## 2026-10-14 19:00 CST — D9：写请求不再各自强制全量边界回同步（活跃负载削峰）
+
+### 0) CI 前置核对
+- **#66** `33741cac` = ✅ success，Release **`ios14-test-66`** 已出（D8，`0.2.28.022`），
+  IPA：`https://github.com/longxiang1002/fluxdo/releases/download/ios14-test-66/fluxdo-ios14-test-66-33741cac.ipa`
+- **#65** = ❌ failure，但失败在 **step4「固定 Xcode 与 Flutter」**（GitHub checkout/环境抖动，
+  非代码），同 commit 的 #66 已全绿出包 → 无需修复。
+- 结论：无未修复 failure、无缺 Release，可推进新工作。
+
+### 1) 证据
+- `webview_http_adapter.dart:534`（改前）响应侧回同步调用：
+  `force: trustsWebViewSession || (method != 'GET' && method != 'HEAD')`
+  → **每个写请求都绕过 800ms 去抖窗口**，强制跑一次 `_syncCriticalCookiesBackToJar`。
+- 该方法 → `BoundarySyncService.syncFromWebView` → `_strategy.readCookiesFromWebView`
+  → iOS `cookieManager.getCookies(url:)` = **`WKHTTPCookieStore` 全量枚举 + 跨 method
+  channel 序列化**。活跃刷帖时点赞/回复/浏览上报等写请求密集 → 每个写请求一次全量枚举。
+- 正确性依据：WV 侧 cookie 变化已由 `CookieStoreObserver`（native
+  `WKHTTPCookieStoreObserver` 推送）的 **500ms debounce** 在请求路径之外统一收敛
+  （`cookie_store_observer.dart:28/113`），写请求响应 cookie 不比 observer 更早/更全。
+  因此写请求可与读请求共用同一去抖快路径，不漏任何 cookie 变化。
+
+### 2) 改动
+- `webview_http_adapter.dart:534`：`force` 判定收窄为 `trustsWebViewSession`
+  （仅「服务端已确认登录态」这一强信号保留 force，auth cookie 立即落 jar 不可延后）。
+- `webview_http_adapter.dart:_syncCriticalCookiesBackToJar`：去抖命中分支新增
+  `cookieBackSyncDeduped++` 计数。
+- `webview_bridge_diagnostics.dart`：新增 `cookieBackSyncDeduped` 字段 + reset 复位。
+- `ios14_network_diagnostics_page.dart`：report map + UI「响应侧边界回同步去抖合并：N 次」。
+- 禁令遵守：无 pauseTimers/resumeTimers、无滚动挂起、不阻塞 JS。
+
+### 3) 本地验证（CI 同款 Dart 3.12.0）
+- `dart format --output=none --set-exit-if-changed`：3 files **0 changed，exit 0** ✅。
+
+### 4) 提交与 CI
+- commit `ec3dcae1`，push `33741cac..ec3dcae1`。
+- `APP_VERSION_SUFFIX` 022 → **023**。
+- 触发 workflow（HTTP 204）→ **run #67**（`38553727443`，in_progress）。
+
+### 下一步
+1. 核对 run#67 → 确认 Release `ios14-test-67`（`0.2.28.023`）+ IPA 直链。
+2. 老板实机：诊断页「重置桥统计」→ 刷帖 → 看「响应侧边界回同步去抖合并 N 次」+ 发热变化。
+3. 下一轮继续找活跃负载发热源（候选：桥并发上限、CF 刷新 WebView 重建频率）。
+
+---
+
+## 2026-10-14 20:00 CST — D10：小请求体内联，砍掉 base64 整包往返（活跃负载削峰）
+
+### 0) CI 前置核对
+- **#67** `ec3dcae1` = ✅ success，Release **`ios14-test-67`** 已出（D9，`0.2.28.023`），
+  IPA：`https://github.com/longxiang1002/fluxdo/releases/download/ios14-test-67/fluxdo-ios14-test-67-ec3dcae1.ipa`
+- **#65** = ❌ failure，失败在 step4「固定 Xcode 与 Flutter」（checkout 网络抖动，非代码），
+  同 commit #66 已全绿出包 → 无需修复。结论：无未修复 failure / 无缺 Release。
+
+### 1) 证据
+- `webview_http_adapter.dart:1215`（改前）非流式请求体一律 base64：
+  `base64Encode(bytes)` → `jsonEncode(base64)` → JS `atob` → `Uint8Array.from(x, cb)` 逐字符回调。
+  两端各一份完整副本 + 逐字节回调，是桥里最重的请求侧序列化路径。
+- 活跃刷帖时写请求（点赞/回复/浏览上报/CSRF 表单）密集且体量仅几十~几百字节
+  → 每个写请求都为这点数据付一次整包 base64 往返。
+- 已有内联出口 `_buildDirectBodyScript` 只覆盖「JSON 对象体」，
+  **经 `_readRequestBytes` 的流式/字节体此前没有内联出口**。
+
+### 2) 改动
+- `webview_http_adapter.dart`：新增 `_buildInlineSmallBodyScript`——
+  ≤4KB 且「严格 UTF-8 解码 + 再编码字节完全一致」→ 直接内联
+  `fetchOptions.body = <jsonEncode(text)>`；否则回退 base64，语义不变。
+- 新增 `_BodyShape.inlineSmall` + 计数分支。
+- `webview_bridge_diagnostics.dart`：`requestBodyInlineSmall` + `requestBodyInlineMaxBytes=4096` + reset 复位。
+- `ios14_network_diagnostics_page.dart`：report map + UI 两处展示。
+- 禁令遵守：无 pauseTimers/resumeTimers、无滚动挂起、不阻塞 JS。
+
+### 3) 本地验证（CI 同款 Dart 3.12.0）
+- `dart format --output=none --set-exit-if-changed`：3 files **0 changed，exit 0** ✅。
+
+### 4) 提交与 CI
+- commit `2cfa57d0`，push `ec3dcae1..2cfa57d0`。
+- `APP_VERSION_SUFFIX` 023 → **024**。触发 workflow（HTTP 204）→ run 号下轮核对。
+
+### 下一步
+1. 核对本轮 run → 确认 Release `ios14-test-<n>`（`0.2.28.024`）+ IPA 直链。
+2. 老板实机：诊断页「重置桥统计」→ 刷帖 → 看「小请求体内联 N 次」+ 发热变化。
+3. 下一轮继续找活跃负载发热源（候选：桥并发上限、CF 刷新 WebView 重建频率）。
+
+---
+
+## 2026-10-14 21:00 CST — D11：帧监控全树遍历按需化（活跃负载 CPU 源）
+
+### 0) CI 前置核对
+- **#68** `2cfa57d0` = ✅ success，Release **`ios14-test-68`** 已出（D10，`0.2.28.024`），
+  IPA：`https://github.com/longxiang1002/fluxdo/releases/download/ios14-test-68/fluxdo-ios14-test-68-2cfa57d0.ipa`
+- **#67** `ec3dcae1` = ✅ success（D9，`0.2.28.023`）；**#66** = ✅ success。
+- 结论：无未修复 failure、无缺 Release，可推进新工作。
+
+### 1) 证据（活跃负载路径，非空转）
+- `frame_jank_monitor.dart:_emitSummary`（改前）每个 summary 窗口无条件执行两笔
+  **O(树大小)** 递归：
+  - `countSemanticsNodes()`（:858）——遍历整棵语义树；
+  - `countPlatformViews()`（:887）——遍历整棵渲染树（`visitChildren` 全递归）。
+- 窗口节流规则（:680-687）：`_windowHadJank ? 10s : 60s`。**活跃刷帖时掉帧频繁
+  → `_windowHadJank` 恒真 → 窗口恒为 10s**，于是整场刷帖会话每 10 秒就在 UI 线程上
+  遍历两棵树。这与「活跃使用时发热」的症状精确吻合。
+- 这两个数字的唯一消费方是**诊断页 UI / 导出报告**（给人看）；普通用户路径
+  纯浪费。release 下 `debugPrint` 已被置空（main.dart:236），但 `_emitSummary`
+  的实参在**调用前**就已求值 → 遍历照跑，debugPrint 置空救不了它。
+
+### 2) 改动
+- `frame_jank_monitor.dart`：新增 `_diagViewCount` / `hasDiagnosticsViewer` /
+  `setDiagnosticsViewerVisible(bool)`；`_emitSummary` 改为仅当
+  `hasDiagnosticsViewer` 时才做全树遍历，否则输出
+  `tree stats: skipped (no diagnostics viewer)`（O(1)，日志仍证明监控活着）。
+- `perf_diagnostics_page.dart`：`initState` 置位 / 新增 `dispose` 撤销。
+- `perf_overlay.dart`：`_PerfPanelState` 新增 `initState` 置位 / `dispose` 撤销。
+- 计数用加减而非布尔，天然支持「诊断页 + 悬浮面板同时打开」。
+- **硬性禁令遵守**：无 pauseTimers/resumeTimers，无滚动挂起，不阻塞/不改变 JS 执行。
+
+### 3) 本地验证（CI 同款 Dart 3.12.0）
+- `dart format --output=none --set-exit-if-changed`：3 files **0 changed，exit 0** ✅。
+
+### 4) 提交与 CI
+- commit `4acb7cc9`，push `2cfa57d0..4acb7cc9`。
+- `APP_VERSION_SUFFIX` 024 → **025**。触发 workflow（HTTP 204）→ run 号下轮核对。
+
+### 下一步
+1. 核对本轮 run → 确认 Release `ios14-test-<n>`（`0.2.28.025`）+ IPA 直链。
+2. 下一轮继续找活跃负载发热源（候选：桥并发上限、CF 刷新 WebView 重建频率、
+   响应侧大文本体分块策略）。
+
+---
+
+## 2026-10-14 22:00 CST | D12 活跃期桥负载探针（先量后改）
+
+### 0) CI 前置核对
+- **#70** `96bbfeea`（已读上报四计数）= in_progress，**卡在 step8「格式与静态分析」**
+  （22:00 已约 25 分钟；该步逐文件跑 `dart analyze --fatal-infos`，2 核慢属正常）。
+  **无 conclusion=failure，无需先修。**
+- **#69** `4acb7cc9` = ✅ success（D11，`0.2.28.025`）；
+  **#68** = ✅ success（D10，`0.2.28.024`），Release `ios14-test-68` 已出。
+- 结论：无未修复 failure，可推进新工作。
+
+### 1) 证据
+- D1 `WebViewBridgeDiagnostics` 只有总量画像（请求数/字节/累计耗时），
+  无法回答「活跃刷帖时桥是持续并发还是偶尔突发」「单次固定跨语言税多贵」。
+- 老板实测 test-48 后空闲不热、刷一会仍发热 → 需先量出桥的**并发**与**单次成本**，
+  否则下一轮改并发限流/D3 仍是盲改。
+
+### 2) 改动
+- 新增 `webview_bridge_probe.dart`：`concurrencyPeak`（并发峰值）、
+  `concurrencySamples`/`idleSamples`（1s 采样→忙碌占比）、
+  `inFlightMs`/`completedRequests`（平均在飞时长）；采样器仅在「有请求在飞」时启动，
+  归零即停，空闲零开销；常开零日志。
+- `webview_http_adapter.dart`：fetch 进入 `onRequestStart()`，finally
+  `onRequestEnd(totalWatch.elapsed)`（成功/失败/取消都收敛）。
+- `ios14_network_diagnostics_page.dart`：新增「活跃期桥负载探针（D12）」区块 + 清零按钮。
+- 无 pauseTimers/resumeTimers、无滚动挂起、不改请求行为、不阻塞 JS。
+
+### 3) 本地验证（CI 同款 Dart 3.12.0）
+- `dart format --set-exit-if-changed`：4 files **0 changed，exit 0** ✅。
+- `flutter test webview_bridge_probe_test.dart`：**5 项全过** ✅。
+
+### 4) 提交与 CI
+- commit `1cba3697`，push `96bbfeea..1cba3697`。
+- `APP_VERSION_SUFFIX` 025 → **026**。触发 workflow（HTTP 204）→ run 号下轮核对。
+
+### 下一步
+1. 核对 #70 与本轮 run → 确认 Release + IPA 直链。
+2. 实机刷帖后看 D12：并发峰值高+忙碌占比高 → 下一轮做桥并发限流；
+   平均在飞时长 ≫ 原生 → 走 D3 桥内降开销；两者都不高 → 转查 CF 刷新重建频率。
+3. SS 接管内置浏览器方向与主线轮次交替。
+
+---
+
+## 2026-10-14 23:00 CST | D13 桥并发闸门（先量已备，本轮开始治）
+
+### 0) CI 前置核对
+- **#71** `1cba3697`（D12 探针）= **in_progress**，step1–9 全 success，
+  当前跑 step10「构建未签名 IPA」（23:00 时约 54 分钟，正常编译耗时）。
+  **无 conclusion=failure，无需先修。**
+- **#70** `96bbfeea` = ✅ success；**#69** `4acb7cc9` = ✅ success（D11）。
+- Release 已到 `ios14-test-70`。结论：无未修复 failure，可推进新工作。
+
+### 1) 证据
+- D12 探针已能测「并发峰值 / 忙碌占比 / 平均在飞时长」，但**只能测不能治**。
+- 桥是**共享资源**：单个隐藏 WKWebView + 单条 JS 线程。无上限并发不会提高
+  总吞吐——所有请求挤在一条 JS 线程上互相排队，每个都在飞更久，
+  且每个在飞请求都持有桥回调与分块缓冲，CPU 峰值叠加、上下文切换与
+  分块回调次数随并发数增长 → 总 CPU 时间不减反增。
+
+### 2) 改动
+- 新增 `lib/services/network/adapters/webview_bridge_gate.dart`
+  （`WebViewBridgeGate`）：纯 Dart 有界信号量，默认 `maxConcurrent=4`，
+  记录 `peakWaiting` / `queuedTotal`；等待用 `Completer` 队列，
+  不轮询、不 Timer、空闲零开销；`release()` 名额转交（FIFO），
+  `reset()` 只清统计不丢弃等待者。
+- `webview_http_adapter.dart`：`fetch` 进入后 `await gate.acquire()`，
+  `finally` 里 `gate.release()`（放在 `onRequestEnd` 之后，
+  保证在飞时长统计包含排队时间）。
+- `webview_bridge_diagnostics.dart`：新增 `imageResponseBytes`
+  （同源图片走桥响应字节，D2 分流收益对比用），`reset()` 一并清零。
+- `ios14_network_diagnostics_page.dart`：新增「桥并发闸门（D13）」区块
+  （当前在飞/上限、排队峰值、累计排队）+ 判读 + 重置按钮。
+- **硬性禁令遵守**：等待只发生在 Dart 侧，不碰 `pauseTimers`/`resumeTimers`，
+  无滚动挂起，不阻塞 JS 执行。
+
+### 3) 本地验证（CI 同款 Dart 3.12.0）
+- `dart format --set-exit-if-changed`：3 files **0 changed，exit 0** ✅。
+- `flutter test webview_bridge_gate_test.dart webview_bridge_probe_test.dart`：
+  **10 项全过** ✅。
+
+### 4) 提交与 CI
+- commit `0c371a61`，push `1cba3697..0c371a61`。
+- `APP_VERSION_SUFFIX` 026 → **027**。触发 workflow（HTTP 204）→ **run #72**。
+
+### 下一步
+1. 核对 #71 / #72 → 确认 Release + IPA 直链。
+2. 实机刷帖后看 D13：累计排队 > 0 且平均在飞时长下降 → 限流生效，
+   可下调上限 4→3→2 找最优；排队为 0 → 并发本就不高，转查 CF 刷新重建频率。
+3. SS 接管内置浏览器方向与主线轮次交替。
+
+## 2026-10-15 00:00 CST | D14 JS 侧分块合并（活跃负载削峰·响应侧）
+
+### 0) CI 前置核对
+- **#72** `0c371a61`（D13 桥并发闸门）= ✅ success，Release **`ios14-test-72`** 已出
+  （`fluxdo-ios14-test-72-0c371a61.ipa`，`0.2.28.027`）。
+- **#71** `1cba3697`（D12）= ✅ success，Release `ios14-test-71` 已出。
+- **#70** `96bbfeea` = ✅ success。
+- 结论：无未修复 failure，Release/IPA 齐全，可推进新工作。
+
+### 1) 证据：为什么做响应侧合并
+- 二进制流响应路径（`_fetchBinaryStreamResponse`）里，JS 对 `response.body`
+  逐 chunk `reader.read()`，**每个 chunk 各发一次 `postMessage`** 跨桥回传。
+- 每个 `postMessage` 都要跨一次 JS↔native 边界（结构化克隆/转移 +
+  Dart 侧 `setWebMessageCallback` 回调派发 + `_binaryMessageBytes` 分派 +
+  `StreamController.add`）。活跃刷帖时大图以许多小 chunk 到达，
+  边界穿越次数与 chunk 数同阶 → CPU 峰值叠加，属活跃期发热的结构性来源。
+- D2 已把「同源图片」分流走原生，但**跨域图片与其它二进制流仍走桥**，
+  且分流开关一旦因 CF 403 回退，全部图片又会回到这条逐 chunk 路径——
+  所以把这条路径本身做轻，是无论分流与否都成立的收益。
+
+### 2) 改动
+- `webview_http_adapter.dart`（JS 脚本内）：新增 `pushChunk` / `flushPending`，
+  把 reader 的小 chunk 攒进 64KB（`COALESCE_TARGET`）缓冲，
+  满则一次性 `sendBuffer` 发出，流结束时 flush 余量。
+  - **关键正确性**：`flushPending` 必须让 `out` 独占一块恰好 `pendingLen`
+    的 ArrayBuffer（`new Uint8Array(pendingLen)` + `set`），因为
+    `postMessage(buffer, [buffer])` 转移的是**整个** buffer，
+    若沿用 64KB 大缓冲会把尾部未用字节一并送出 → 已按此实现。
+  - 字节序与语义完全不变（仍是同一段连续字节，只是分批粒度更粗）。
+  - 新增 `coalesceStats` 消息（rawChunks / sentMessages）回传统计。
+- `webview_bridge_diagnostics.dart`：新增 `streamRawChunks` /
+  `streamCoalescedMessages` 计数与派生 `streamMessagesSaved`；`reset()` 清零。
+- `webview_http_adapter.dart`（Dart 侧）：消息处理器新增 `coalesceStats` 分支，
+  累加两个计数。
+- `ios14_network_diagnostics_page.dart`：新增「JS 侧分块合并（D14）」区块
+  （原始 chunk → 合并后消息、省下的跨桥消息数）+ 判读；JSON report 增三字段。
+- **硬性禁令遵守**：合并只发生在 JS 侧内存里，不碰 `pauseTimers`/`resumeTimers`，
+  无滚动挂起，不阻塞 JS 执行。
+
+### 3) 本地验证（CI 同款 Dart 3.12.0）
+- `dart format --set-exit-if-changed`：3 个改动 dart 文件 **0 changed，exit 0** ✅
+  （新增测试文件亦 0 changed）。
+- `flutter test`（gate + probe + 新增 coalesce）：**13 项全过** ✅。
+- 注：本地 `flutter analyze` 因 2 核/3.7G 机器 OOM（analysis server exit -9），
+  非代码问题；CI 在 macOS runner 上跑 analyze。
+
+### 4) 提交与 CI
+- commit `226c36f9`，push `0c371a61..226c36f9`。
+- `APP_VERSION_SUFFIX` 027 → **028**。触发 workflow（HTTP 204）→ **run #73**（in_progress）。
+
+### 下一步
+1. 核对 #73 → 确认 Release + IPA 直链。
+2. 实机刷帖后看 D14：原始 chunk 远多于合并后消息 → 合并生效；
+   两者接近 → 响应 chunk 本就大或走 base64 fallback，转查响应侧序列化。
+   可与 D13 排队数据交叉判读：若并发被闸门限住但发热仍在，
+   说明单次在飞成本（含跨桥批数）才是主项 → D14 方向正确。
+3. SS 接管内置浏览器方向与主线轮次交替。

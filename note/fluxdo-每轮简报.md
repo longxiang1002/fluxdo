@@ -1,12 +1,14 @@
-# FluxDO 每轮简报
+【FluxDO 攻坚简报】2026-10-15 00:00（北京时间）
 
-**本轮结论**：修好了上轮 CI 失败，新包已出 —— **ios14-test-61（0.2.28.018）可装**。
+本轮结论：主线推进 D14「JS 侧分块合并」——二进制流响应此前每读到一个
+小 chunk 就各自跨桥 postMessage 一次，活跃刷帖时大图会被切成几十上百次
+JS↔native 边界穿越，是活跃期发热的结构性来源。现改为在 JS 侧攒到 64KB
+再一次性回传，把跨桥批数压到约 1/N，字节序与语义完全不变。
 
-**证据**：
-- 上轮 run **#60** 失败：step8 静态分析报 `cookie_store_observer.dart:52 unused_field '_resyncWindow'`（D4 删了引用没删常量声明）→ 无 IPA 无 Release。
-- 本轮修复 commit `a2066c6c`，CI **run #61 全绿**（格式/静态分析 ✅、iOS14 兼容与 CF 回归 ✅、出包 ✅、Release ✅）。
-- IPA 直链：https://github.com/longxiang1002/fluxdo/releases/download/ios14-test-61/fluxdo-ios14-test-61-a2066c6c.ipa
+证据：commit 226c36f9（webview_http_adapter.dart 新增 pushChunk/flushPending
++ coalesceStats 统计；诊断页新增「JS 侧分块合并」区块）；本地 dart format
+0 changed、单测 13 项全过；已 push 并触发 CI run #73（APP_VERSION_SUFFIX 028）。
+前置核对：#72（D13）success，Release ios14-test-72 + IPA 已出，无未修复失败。
 
-**下一步**：老板实机装 0.2.28.018 → 诊断页「重置桥统计」→ 刷帖 → 看「边界同步延后收敛 N 次」「同源图片已分流原生 N 次」，反馈活跃发热是否下降；下一轮回到主线继续找活跃负载发热源。
-
-（北京时间 2026-10-14 12:5x）
+下一步：等 #73 出包；实机刷帖后看诊断页「原始 chunk → 合并后消息」——
+原始 chunk 远多于消息数即合并生效，可与 D13 排队数据交叉判读。

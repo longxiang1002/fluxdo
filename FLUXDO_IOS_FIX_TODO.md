@@ -4,6 +4,50 @@
 > **2026-10-13 起主攻**：DoH 模式下 App 仍旧发热（症状=**活跃刷帖时**发热，非空闲）。
 
 
+## 🎯 本轮（2026-10-15 00:00 CST）— D14：JS 侧分块合并（响应侧削峰）
+
+### CI 前置核对（强制第 0 步）
+- **#72** `0c371a61`（D13 桥并发闸门）= ✅ success，Release **`ios14-test-72`** 已出
+  （`fluxdo-ios14-test-72-0c371a61.ipa`，`0.2.28.027`）。
+- **#71** `1cba3697`（D12）= ✅ success，Release `ios14-test-71` 已出。
+- **#70** `96bbfeea` = ✅ success。
+- 结论：无未修复 failure，Release/IPA 齐全，可推进新工作。
+
+### 1) 证据
+- 二进制流响应路径里 JS 对 `response.body` 逐 chunk `reader.read()`，
+  **每个 chunk 各发一次 `postMessage`** 跨桥回传；每次都要跨 JS↔native
+  边界 + Dart 回调派发。活跃刷帖时大图以许多小 chunk 到达，
+  边界穿越批数与 chunk 数同阶 → CPU 峰值叠加（活跃期发热结构性来源）。
+- 跨域图片与其它二进制流仍走桥，且 D2 分流开关一旦因 CF 403 回退，
+  全部图片会回到这条逐 chunk 路径 → 把该路径本身做轻，收益与分流无关。
+
+### 2) 改动
+- `webview_http_adapter.dart`：JS 侧新增 `pushChunk`/`flushPending`，
+  攒到 64KB 再一次性跨桥回传；流末 flush 余量；新增 `coalesceStats` 回传统计。
+  - **正确性**：flush 时 `out` 独占恰好 `pendingLen` 的 ArrayBuffer
+    （transfer 会送整个 buffer，不能带 64KB 尾部垃圾）。
+  - Dart 侧消息处理器新增 `coalesceStats` 分支累加计数。
+- `webview_bridge_diagnostics.dart`：新增 `streamRawChunks` /
+  `streamCoalescedMessages` / 派生 `streamMessagesSaved`；`reset()` 清零。
+- `ios14_network_diagnostics_page.dart`：新增「JS 侧分块合并（D14）」区块 + 判读；
+  JSON report 增三字段。
+- **禁令遵守**：只在 JS 内存里合并，不碰 pauseTimers/resumeTimers，不阻塞 JS。
+
+### 3) 本地验证（CI 同款 Dart 3.12.0）
+- `dart format --set-exit-if-changed`：**0 changed，exit 0** ✅。
+- `flutter test`（gate + probe + coalesce）：**13 项全过** ✅。
+- 本地 `flutter analyze` OOM（analysis server -9），非代码问题。
+
+### 4) 提交与 CI
+- commit `226c36f9`，push `0c371a61..226c36f9`。
+- `APP_VERSION_SUFFIX` 027 → **028**。触发 workflow（HTTP 204）→ **run #73**。
+
+### 下一步
+1. 核对 #73 → 确认 Release + IPA 直链。
+2. 实机刷帖后看 D14：原始 chunk ≫ 合并后消息 → 合并生效；
+   两者接近 → 转查响应侧序列化。与 D13 排队数据交叉判读。
+3. SS 接管内置浏览器方向与主线轮次交替。
+
 ## 🎯 本轮（2026-10-14 23:00 CST）— D13：桥并发闸门 + 响应字节量化
 
 ### CI 前置核对（强制第 0 步）
