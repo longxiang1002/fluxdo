@@ -94,6 +94,20 @@ class _PerfPanelState extends State<_PerfPanel> {
   bool _expanded = false;
   bool _sampling = false;
 
+  @override
+  void initState() {
+    super.initState();
+    // D11: 悬浮面板显示期间 = 有人看，summary 才付全树遍历。
+    FrameJankMonitor.setDiagnosticsViewerVisible(true);
+  }
+
+  @override
+  void dispose() {
+    // D11: 面板移除即撤销，恢复「无人查看 → 跳过全树遍历」。
+    FrameJankMonitor.setDiagnosticsViewerVisible(false);
+    super.dispose();
+  }
+
   /// 展开前的胶囊位置:展开态可能因尺寸变大被钳制移位,收起时恢复原位;
   /// 展开期间用户手动拖过(置 null)则以拖后位置为准,不回弹。
   Offset? _posBeforeExpand;

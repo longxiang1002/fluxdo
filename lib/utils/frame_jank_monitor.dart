@@ -149,6 +149,36 @@ class FrameJankMonitor {
   static bool _started = false;
   static bool get isRunning => _started;
 
+  /// D11: 「诊断视图可见」计数。
+  ///
+  /// 动机（活跃刷帖发热）：[_emitSummary] 里最贵的两笔是
+  /// [countSemanticsNodes]（整棵语义树递归）与 [countPlatformViews]
+  /// （整棵渲染树递归）。它们存在的唯一目的是**给人看**——诊断页的实时
+  /// 数字、导出报告里的语义树/平台视图规模。改前只要监控在跑，每个
+  /// summary 窗口都会无条件付一次全树遍历：活跃刷帖时掉帧频繁，
+  /// `_windowHadJank` 恒真 → 窗口恒为 [_summaryInterval]（10s），
+  /// 于是整场刷帖会话每 10 秒就在 UI 线程上遍历两棵树。
+  ///
+  /// 这与「活跃使用时发热」的症状完全吻合，且是纯浪费——普通用户
+  /// 根本看不到这两个数字。
+  ///
+  /// 改后：只有诊断页 / 悬浮面板**真正打开**时才置位，summary 才做全树
+  /// 遍历；否则只输出 O(1) 的计数（帧数/掉帧数/最差帧耗时），日志的
+  /// 「监控活着」证明力不受影响。
+  static int _diagViewCount = 0;
+
+  /// 诊断视图（诊断页 / 悬浮面板）是否可见。
+  static bool get hasDiagnosticsViewer => _diagViewCount > 0;
+
+  /// 诊断视图挂载/卸载时调用；计数归零即视为无人查看。
+  static void setDiagnosticsViewerVisible(bool visible) {
+    if (visible) {
+      _diagViewCount++;
+    } else if (_diagViewCount > 0) {
+      _diagViewCount--;
+    }
+  }
+
   /// 掉帧记录(环形,最新在末尾)
   static final List<JankRecord> jankRecords = [];
 
@@ -699,15 +729,26 @@ class FrameJankMonitor {
   }
 
   static void _emitSummary() {
-    final semanticsEnabled = SemanticsBinding.instance.semanticsEnabled;
+    // D11: 全树遍历只在有人看的时候付。无人查看诊断页/悬浮面板时，
+    // semantics/platform views 两笔 O(树大小) 递归是纯浪费——活跃刷帖
+    // 时掉帧频繁会让窗口恒为 10s，等于整场会话每 10 秒遍历两棵树。
+    // 这里降级为 O(1) 输出，日志仍能证明监控活着。
+    final String treeStats;
+    if (hasDiagnosticsViewer) {
+      final semanticsEnabled = SemanticsBinding.instance.semanticsEnabled;
+      treeStats =
+          'semantics: ${semanticsEnabled ? countSemanticsNodes() : 'off'}, '
+          'platform views: ${countPlatformViews()}';
+    } else {
+      treeStats = 'tree stats: skipped (no diagnostics viewer)';
+    }
     debugPrint(
       '[JANK] summary: $_janks/$_frames janky, '
       'worst build ${_ms(_worstBuild)}ms, '
       'worst raster ${_ms(_worstRaster)}ms, '
       'budget ${(_budgetUs() / 1000).toStringAsFixed(1)}ms'
       '@${displayRefreshRate()?.toStringAsFixed(0) ?? '?'}Hz, '
-      'semantics: ${semanticsEnabled ? countSemanticsNodes() : 'off'}, '
-      'platform views: ${countPlatformViews()}',
+      '$treeStats',
     );
   }
 
