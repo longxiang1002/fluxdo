@@ -285,10 +285,19 @@ document.close();
           // method channel 往返（每 name 3 次），活跃刷帖时每个请求都跑一遍
           // 是纯浪费——prime() 幂等保证 jar→WV 已经就绪，sweep 只负责
           // 清 WV 侧多出来的变体，而变体只可能来自 WV 自身写入。
+          // D4: 若 WV 侧 cookie 变化正「待收敛」（CookieStoreObserver 已收到
+          // 变化、其 500ms debounce 尚未到期），则**不在本请求路径上**同步
+          // sweep——变化由 debounce 在请求路径之外统一收敛，本请求直接用
+          // 已就绪的 cookie 集。这样刷帖时 CF 持续下发 cookie 不再让每个
+          // 请求都背一次边界同步。
           if (!bridgeStats.cookieBoundarySynced) {
-            await SessionCookieSentinel.instance.sweepAll(url);
-            bridgeStats.cookieBoundarySynced = true;
-            bridgeStats.cookieSweeps++;
+            if (bridgeStats.cookieResyncPending) {
+              bridgeStats.cookieSweepsDeferred++;
+            } else {
+              await SessionCookieSentinel.instance.sweepAll(url);
+              bridgeStats.cookieBoundarySynced = true;
+              bridgeStats.cookieSweeps++;
+            }
           } else {
             bridgeStats.cookieSweepsSkipped++;
           }

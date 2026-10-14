@@ -4,6 +4,7 @@ import 'dart:io' as io;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import '../adapters/webview_bridge_diagnostics.dart';
 import 'session_cookie_sentinel.dart';
 
 /// 监听 WV cookie store 的外部变化,触发 sweep。
@@ -29,6 +30,26 @@ class CookieStoreObserver {
   bool _attached = false;
   Timer? _debounce;
   final Set<String> _knownUrls = {};
+
+  /// D4: 收到外部 cookie 变化后，到下一位点之间最多等多久才真正 sweep。
+  ///
+  /// 动机（活跃刷帖发热）：此前 `cookiesDidChange` 一到就把
+  /// `cookieBoundarySynced` 置 false，于是**下一个走桥请求**在自身请求路径上
+  /// 同步跑一次 `sweepAll`（O(cookie 数) 次原生 `getAllCookies` 全量枚举 +
+  /// 跨语言往返），即使那次变化只是 CF 轮换/服务端下发的一枚新 cookie、
+  /// 根本不需要在请求路径上立刻收敛。刷帖时 CF 会持续下发 cookie，等于
+  /// 每个请求都背着一次边界同步。
+  ///
+  /// 这里改为「延后同步」：变化只把状态标记为「待同步」，由已在跑的
+  /// 500ms debounce（[notifyExternalChange] / native 事件共用）在**请求路径
+  /// 之外**完成一次 sweep；期间到达的走桥请求直接跳过同步（与 D2 的
+  /// 「已同步即跳过」同一语义，只是把「已同步」的判定从「被变化立刻作废」
+  /// 改成「由 debounce 统一收敛」）。
+  ///
+  /// 正确性：sweep 本就是最终一致的兜底，延后一个 debounce 窗口不改变
+  /// 任何同步/删除语义；窗口内到达的请求用到的仍是 jar↔WV 已就绪的
+  /// cookie 集（priming 幂等保证），只是不在这条请求路径上做去重。
+  static const Duration _resyncWindow = Duration(milliseconds: 500);
 
   /// native observer 支持的平台 (macOS / iOS)。
   ///
@@ -86,11 +107,17 @@ class CookieStoreObserver {
 
   void _onCookiesChanged() {
     _debounce?.cancel();
+    // D4: 只标记「待同步」，不在请求路径上立即失效边界同步状态。
+    // 真正的 sweep 交给下面的 debounce 在请求路径之外完成。
+    WebViewBridgeDiagnostics.instance.markResyncPending();
     _debounce = Timer(_debounceWindow, _doSweep);
   }
 
   Future<void> _doSweep() async {
     final urls = _knownUrls.toList(growable: false);
+    // D4: 无论是否有已知 url，debounce 到期即视为「已收敛」——清掉待同步
+    // 标记，让后续走桥请求恢复「已同步即跳过」的快路径。
+    WebViewBridgeDiagnostics.instance.clearResyncPending();
     if (urls.isEmpty) return;
     debugPrint(
       '[CookieObserver] external cookie change detected, sweepAll for $urls',
@@ -100,8 +127,7 @@ class CookieStoreObserver {
         final results = await SessionCookieSentinel.instance.sweepAll(url);
         final mismatch = results
             .where(
-              (r) => r.variantsBefore != r.variantsAfter ||
-                  r.variantsAfter > 1,
+              (r) => r.variantsBefore != r.variantsAfter || r.variantsAfter > 1,
             )
             .toList();
         if (mismatch.isNotEmpty) {

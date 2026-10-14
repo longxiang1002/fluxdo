@@ -185,6 +185,7 @@ class _Ios14NetworkDiagnosticsPageState
       'cookieBatchCountNames': s.cookieBatchCountNames,
       'variantCountCacheHits': s.variantCountCacheHits,
       'imageRoutedNative': s.imageRoutedNative,
+      'cookieSweepsDeferred': s.cookieSweepsDeferred,
     };
   }
 
@@ -288,6 +289,12 @@ class _Ios14NetworkDiagnosticsPageState
             'Cookie 边界同步：执行 ${_bridge.cookieSweeps} 次'
             ' / 省去 ${_bridge.cookieSweepsSkipped} 次',
           ),
+          if (_bridge.cookieSweepsDeferred > 0)
+            Text(
+              '边界同步延后收敛：${_bridge.cookieSweepsDeferred} 次'
+              '（D4：WV cookie 变化交由 debounce 在请求路径外收敛，'
+              '不再让每个走桥请求各背一次 sweepAll）',
+            ),
           Text(
             '批量取数：${_bridge.cookieBatchCountCalls} 次调用'
             '覆盖 ${_bridge.cookieBatchCountNames} 个 cookie 名'

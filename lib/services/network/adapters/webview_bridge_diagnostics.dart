@@ -81,6 +81,28 @@ class WebViewBridgeDiagnostics {
   /// 只是把一次多余的同步调用省掉。
   bool cookieBoundarySynced = false;
 
+  /// D4: 是否有「WV 侧 cookie 变化待收敛」。
+  ///
+  /// 由 [CookieStoreObserver] 在收到外部 cookie 变化时置位，由其在
+  /// debounce 窗口到期后清位。置位期间走桥请求**不**在自身请求路径上跑
+  /// `sweepAll`（改由 debounce 在请求路径之外统一收敛），清位后恢复
+  /// 「已同步即跳过」的快路径。
+  bool cookieResyncPending = false;
+
+  /// D4: 因「cookie 变化已交由 debounce 延后收敛」而在请求路径上省下的
+  /// `sweepAll` 次数。这个数字就是本轮从活跃请求路径上摘掉的边界同步批数。
+  int cookieSweepsDeferred = 0;
+
+  /// D4: 标记「WV 侧 cookie 变化待收敛」。
+  void markResyncPending() {
+    cookieResyncPending = true;
+  }
+
+  /// D4: 标记「待收敛的变化已由 debounce 处理完毕」。
+  void clearResyncPending() {
+    cookieResyncPending = false;
+  }
+
   /// D2: WV 侧发生 cookie 写入后调用，让下一次边界同步重新生效。
   ///
   /// 由 [WebViewCookiePriming] / [SessionCookieSentinel] 在完成 WV 侧写入后调用。
@@ -123,6 +145,8 @@ class WebViewBridgeDiagnostics {
   /// D2: 新的 WebView 会话建立/销毁时复位（新存储 = 需重新同步）。
   void resetCookieBoundarySync() {
     cookieBoundarySynced = false;
+    // D4: 新会话的 cookie 变化同样交由 debounce 收敛，而非请求路径。
+    cookieResyncPending = false;
     // D3: 新会话 = 全新 cookie 存储，缓存计数一律作废。
     invalidateVariantCounts();
   }
@@ -154,6 +178,8 @@ class WebViewBridgeDiagnostics {
     cookieBatchCountNames = 0;
     imageRoutedNative = 0;
     variantCountCacheHits = 0;
+    cookieResyncPending = false;
+    cookieSweepsDeferred = 0;
     _variantCounts.clear();
   }
 }
