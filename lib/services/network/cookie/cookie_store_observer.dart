@@ -44,12 +44,12 @@ class CookieStoreObserver {
   /// 500ms debounce（[notifyExternalChange] / native 事件共用）在**请求路径
   /// 之外**完成一次 sweep；期间到达的走桥请求直接跳过同步（与 D2 的
   /// 「已同步即跳过」同一语义，只是把「已同步」的判定从「被变化立刻作废」
-  /// 改成「由 debounce 统一收敛」）。
+  /// 改成「由 debounce 统一收敛」）。收敛窗口即 [_debounceWindow]，
+  /// 不再单独定义常量（原 `_resyncWindow` 从未被引用，已移除）。
   ///
   /// 正确性：sweep 本就是最终一致的兜底，延后一个 debounce 窗口不改变
   /// 任何同步/删除语义；窗口内到达的请求用到的仍是 jar↔WV 已就绪的
   /// cookie 集（priming 幂等保证），只是不在这条请求路径上做去重。
-  static const Duration _resyncWindow = Duration(milliseconds: 500);
 
   /// native observer 支持的平台 (macOS / iOS)。
   ///
