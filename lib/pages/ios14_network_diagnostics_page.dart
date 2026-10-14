@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../services/diagnostics/ios14_diagnostics.dart';
 import '../services/network/adapters/apple_transport_policy.dart';
 import '../services/network/adapters/platform_adapter.dart';
 import '../services/network/adapters/webview_bridge_diagnostics.dart';
@@ -40,6 +41,7 @@ class _Ios14NetworkDiagnosticsPageState
   final _routes = DohRouteDiagnostics.instance;
   final _proxyService = ProxySettingsService.instance;
   final _bridge = WebViewBridgeDiagnostics.instance;
+  final _diag = Ios14Diagnostics.instance;
   bool _testing = false;
   String _dnsResult = '尚未测试';
   int? _testedVersion;
@@ -153,6 +155,15 @@ class _Ios14NetworkDiagnosticsPageState
     // ── 网络桥开销画像（D1）──
     // 只暴露聚合计数与字节量，不含 URL/正文，无账户内容。
     'bridgeStats': _bridgeReport(),
+    // ── 已读上报（/topics/timings）计数 ──
+    // 只暴露固定事件计数，不含 URL/正文/账户内容。
+    'readReport': {
+      'timingsSend': _diag.countOf(Ios14DiagnosticEvent.timingsSend),
+      'timingsSuccess': _diag.countOf(Ios14DiagnosticEvent.timingsSuccess),
+      'timingsError': _diag.countOf(Ios14DiagnosticEvent.timingsError),
+      'timingsRetry': _diag.countOf(Ios14DiagnosticEvent.timingsRetry),
+      'diagnosticsEnabled': _diag.enabled,
+    },
     'iosIoFallback': usesIosIoTransport,
     'dnsTestVersion': _testedVersion,
     'dnsTestResult': _dnsResult,
@@ -360,6 +371,33 @@ class _Ios14NetworkDiagnosticsPageState
           OutlinedButton(
             onPressed: () => setState(WebViewBridgeDiagnostics.instance.reset),
             child: const Text('重置桥统计（刷帖前清零）'),
+          ),
+          const Divider(height: 24),
+          // ── 已读上报（/topics/timings）──
+          // 直接回答「刷过的帖子为什么不识别已读」：区分「压根没发」
+          // （_inProgress/_cfFrozen 卡死、未登录）与「发了但失败」
+          // （CF 403/超时）与「发了也成功」（问题在服务端或游标同步）。
+          const Text(
+            '已读上报（/topics/timings）',
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+          Text(
+            '发送 ${_diag.countOf(Ios14DiagnosticEvent.timingsSend)} 次'
+            ' / 成功 ${_diag.countOf(Ios14DiagnosticEvent.timingsSuccess)} 次'
+            ' / 失败 ${_diag.countOf(Ios14DiagnosticEvent.timingsError)} 次'
+            ' / 重试 ${_diag.countOf(Ios14DiagnosticEvent.timingsRetry)} 次',
+          ),
+          const Text(
+            '判读：发送不涨＝压根没发（上报被冻结或未登录）；'
+            '发送涨但成功不涨＝请求失败（CF 403/超时）；'
+            '发送涨且成功涨＝已上报成功，若仍不识别则问题在服务端或本地游标同步。'
+            '需先在设置里开启「聚合诊断」才会计数。',
+          ),
+          OutlinedButton(
+            onPressed: () => setState(() {
+              Ios14Diagnostics.instance.reset();
+            }),
+            child: const Text('重置已读上报计数（刷帖前清零）'),
           ),
           const Divider(height: 24),
           if (webViewUnsupported)

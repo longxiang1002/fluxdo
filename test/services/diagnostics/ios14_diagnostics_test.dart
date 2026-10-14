@@ -54,4 +54,29 @@ void main() {
       lessThanOrEqualTo(60),
     );
   });
+
+  test(
+    'countOf sums across buckets, respects enable, zero before any record',
+    () {
+      var now = DateTime.utc(2026);
+      final diagnostics = Ios14Diagnostics(clock: () => now);
+      // 未启用时不计；读取恒为 0。
+      diagnostics.record(Ios14DiagnosticEvent.timingsSend);
+      expect(diagnostics.countOf(Ios14DiagnosticEvent.timingsSend), 0);
+      expect(diagnostics.countOf(Ios14DiagnosticEvent.timingsError), 0);
+
+      diagnostics.setEnabled(true);
+      diagnostics.record(Ios14DiagnosticEvent.timingsSend);
+      diagnostics.record(Ios14DiagnosticEvent.timingsSend);
+      now = now.add(const Duration(minutes: 1));
+      diagnostics.record(Ios14DiagnosticEvent.timingsSend);
+      // 跨分钟桶求和。
+      expect(diagnostics.countOf(Ios14DiagnosticEvent.timingsSend), 3);
+      // 未记录过的事件仍为 0。
+      expect(diagnostics.countOf(Ios14DiagnosticEvent.timingsError), 0);
+      // 重置后归零。
+      diagnostics.reset();
+      expect(diagnostics.countOf(Ios14DiagnosticEvent.timingsSend), 0);
+    },
+  );
 }

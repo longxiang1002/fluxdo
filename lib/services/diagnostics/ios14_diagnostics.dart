@@ -59,6 +59,19 @@ class Ios14Diagnostics {
 
   void record(Ios14DiagnosticEvent event) => _record(event.name);
 
+  /// 读取某事件在保留窗口内的累计次数（跨分钟桶求和）。
+  ///
+  /// 只读、无副作用，供诊断页直接展示「已读上报是否发出/成功」这类
+  /// 关键计数，避免必须导出 JSON 才能判读。关闭采集时恒为 0。
+  int countOf(Ios14DiagnosticEvent event) {
+    final key = event.name;
+    var total = 0;
+    for (final counts in _buckets.values) {
+      total += counts[key] ?? 0;
+    }
+    return total;
+  }
+
   /// 在真实传输分派时调用，不在设置选择时计数。
   /// 每次请求只接受固定引擎和路径组合，不接受端点或域名。
   void recordRoute({
