@@ -189,6 +189,7 @@ class _Ios14NetworkDiagnosticsPageState
       'textBodyUnescaped': s.textBodyUnescaped,
       'textBodyUnescapedBytes': s.textBodyUnescapedBytes,
       'webViewPreservedOnConfigChange': s.webViewPreservedOnConfigChange,
+      'primingDeduped': s.primingDeduped,
     };
   }
 
@@ -308,6 +309,12 @@ class _Ios14NetworkDiagnosticsPageState
             Text(
               'WebView 桥跨配置变更复用：${_bridge.webViewPreservedOnConfigChange} 次'
               '（D6：无关设置版本 bump 不再拆掉隐藏 WKWebView，省下重建 + 重灌 cookie）',
+            ),
+          if (_bridge.primingDeduped > 0)
+            Text(
+              '重复 cookie 重灌去抖：${_bridge.primingDeduped} 次'
+              '（D7：距上次 prime 不足 2s 的重复 priming 被短路，'
+              '省下 O(cookie 数) 次原生 cookie 库往返）',
             ),
           Text(
             '批量取数：${_bridge.cookieBatchCountCalls} 次调用'

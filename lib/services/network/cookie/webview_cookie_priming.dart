@@ -51,6 +51,19 @@ class WebViewCookiePriming {
 
   bool _isPrimed = false;
 
+  /// D7: 上一次成功 prime 完成的时间。
+  ///
+  /// 用于「刚 prime 过就别再 prime」的去抖：活跃刷帖时 CF 刷新 / 会话同步
+  /// 会频繁 `invalidate()` + `prime()`，每次 prime 都是 O(cookie 数) 次原生
+  /// cookie 库往返（先删后写 + 逐名计数校验）。若距上次成功 prime 不足
+  /// [_primeDedupWindow]，直接短路——jar→WV 的 cookie 集在这点时间内不会
+  /// 出现需要重新全量重灌的漂移（真正的 WV 侧变化由 CookieStoreObserver
+  /// 的 debounce 负责收敛，与 prime 无关）。
+  DateTime? _lastPrimeCompletedAt;
+
+  /// D7: 重复 priming 去抖窗口。窗口内再次 prime 视为重复，直接复用上次结果。
+  static const Duration _primeDedupWindow = Duration(seconds: 2);
+
   static const Duration _variantCleanupRetryDelay = Duration(milliseconds: 120);
   static const int _variantCleanupMaxAttempts = 2;
 
@@ -70,6 +83,18 @@ class WebViewCookiePriming {
   /// 详见 §5.2 接口契约。
   Future<void> prime(String url) async {
     if (_isPrimed) return;
+
+    // D7: 去抖——距上次成功 prime 不足窗口时，重复 prime 直接短路。
+    // 活跃刷帖时 CF 刷新 / 会话同步会反复 invalidate()+prime()，每次都是
+    // O(cookie 数) 次原生往返；这里只削峰，不改变「未 prime 必然 prime」的
+    // 正确性（窗口外的 prime 照常执行）。
+    final lastCompletedAt = _lastPrimeCompletedAt;
+    if (lastCompletedAt != null &&
+        DateTime.now().difference(lastCompletedAt) < _primeDedupWindow) {
+      WebViewBridgeDiagnostics.instance.markPrimingDeduped();
+      _isPrimed = true;
+      return;
+    }
 
     // 同 url 并发去重
     final existing = _primingFuture;
@@ -92,8 +117,12 @@ class WebViewCookiePriming {
   }
 
   /// 标记 WV 状态为"未就绪"。
+  ///
+  /// D7: 一并清掉去抖时间戳——显式 invalidate 的语义是「WV 存储可能已变」，
+  /// 此时必须允许下一次 prime 真正执行，不能被去抖窗口挡住。
   void invalidate() {
     _isPrimed = false;
+    _lastPrimeCompletedAt = null;
   }
 
   /// 等待当前正在进行的 priming 完成（如有）。
@@ -108,6 +137,7 @@ class WebViewCookiePriming {
     _isPrimed = false;
     _primingFuture = null;
     _primingUrl = null;
+    _lastPrimeCompletedAt = null;
   }
 
   // ---------------------------------------------------------------------------
@@ -268,6 +298,8 @@ class WebViewCookiePriming {
       }
 
       _isPrimed = true;
+      // D7: 记录成功完成时间，供下次 prime 的去抖判定。
+      _lastPrimeCompletedAt = DateTime.now();
       final hasMismatch = mismatched.isNotEmpty || missingNames.isNotEmpty;
       debugPrint(
         '[Priming] WV primed for $url: '

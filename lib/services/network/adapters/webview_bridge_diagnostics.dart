@@ -165,6 +165,21 @@ class WebViewBridgeDiagnostics {
     webViewPreservedOnConfigChange++;
   }
 
+  /// D7: 因「刚 prime 过、无需重复 prime」而被削掉的重复 priming 次数。
+  ///
+  /// 动机（活跃刷帖发热）：`CfClearanceRefreshService` / `WebViewSessionSync`
+  /// 在每次重建隐藏 WebView 前都会 `invalidate()` + `prime()`。活跃刷帖时
+  /// CF 持续触发刷新，每次 prime 都要对全部 cookie 做「先删后写 + 逐名计数
+  /// 校验」——O(cookie 数) 次原生 cookie 库往返，是活跃负载下的固定 CPU 源。
+  /// 这里把「距上次成功 prime 不足去抖窗口」的重复 prime 直接短路，只计一次
+  /// 削峰。
+  int primingDeduped = 0;
+
+  /// D7: 标记「一次重复 priming 被去抖短路」。
+  void markPrimingDeduped() {
+    primingDeduped++;
+  }
+
   /// D2: 新的 WebView 会话建立/销毁时复位（新存储 = 需重新同步）。
   void resetCookieBoundarySync() {
     cookieBoundarySynced = false;
@@ -206,6 +221,7 @@ class WebViewBridgeDiagnostics {
     textBodyUnescaped = 0;
     textBodyUnescapedBytes = 0;
     webViewPreservedOnConfigChange = 0;
+    primingDeduped = 0;
     _variantCounts.clear();
   }
 }
