@@ -176,6 +176,7 @@ class _Ios14NetworkDiagnosticsPageState
       'requestBodyBase64': s.requestBodyBase64,
       'requestBodyStreamBridge': s.requestBodyStreamBridge,
       'requestBodyDirect': s.requestBodyDirect,
+      'requestBodyInlineSmall': s.requestBodyInlineSmall,
       'avgTotalMs': s.totalRequests == 0 ? 0 : s.totalMs ~/ s.totalRequests,
       'avgJsEvalMs': s.totalRequests == 0 ? 0 : s.jsEvalMs ~/ s.totalRequests,
       'failed': s.failed,
@@ -285,7 +286,8 @@ class _Ios14NetworkDiagnosticsPageState
           Text(
             '请求体形态：direct ${_bridge.requestBodyDirect}'
             ' / streamBridge ${_bridge.requestBodyStreamBridge}'
-            ' / base64 ${_bridge.requestBodyBase64}',
+            ' / base64 ${_bridge.requestBodyBase64}'
+            ' / 小体内联 ${_bridge.requestBodyInlineSmall}',
           ),
           Text(
             '平均耗时 ${_bridge.totalRequests == 0 ? 0 : _bridge.totalMs ~/ _bridge.totalRequests}ms'
@@ -329,6 +331,12 @@ class _Ios14NetworkDiagnosticsPageState
               '响应侧边界回同步去抖合并：${_bridge.cookieBackSyncDeduped} 次'
               '（D9：写请求不再各自强制全量枚举 WV cookie，'
               '与读请求共用 800ms 去抖窗口，省下全量 getAllCookies 枚举）',
+            ),
+          if (_bridge.requestBodyInlineSmall > 0)
+            Text(
+              '小请求体内联：${_bridge.requestBodyInlineSmall} 次'
+              '（D10：≤${WebViewBridgeDiagnostics.requestBodyInlineMaxBytes}B 的文本请求体'
+              '不再走 base64 整包往返，省下 Dart 编码 + JS atob/Uint8Array.from 逐字节解码）',
             ),
           Text(
             '批量取数：${_bridge.cookieBatchCountCalls} 次调用'

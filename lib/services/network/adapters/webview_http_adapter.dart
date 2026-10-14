@@ -644,6 +644,9 @@ document.close();
       stats.requestBodyStreamBridge++;
     } else if (shape == _BodyShape.direct) {
       stats.requestBodyDirect++;
+    } else if (shape == _BodyShape.inlineSmall) {
+      // D10: 小请求体内联，省下一次整包 base64 编解码往返。
+      stats.requestBodyInlineSmall++;
     }
   }
 
@@ -1214,6 +1217,25 @@ document.close();
 
     final requestBytes = await _readRequestBytes(requestStream);
     if (requestBytes != null && requestBytes.isNotEmpty) {
+      // D10: 小请求体直接内联为 JSON 字符串字面量。
+      //
+      // 活跃刷帖时写请求（点赞/回复/浏览上报）体量普遍很小，走
+      // base64Encode → jsonEncode → JS atob → Uint8Array.from 的整包往返
+      // 是纯开销：两端各一份完整副本，且逐字符回调解码。
+      //
+      // 内联路径只做一次 Dart 侧 `jsonEncode`（负责全部转义），JS 侧拿到
+      // 的就是现成字符串，零解码、零回调、零额外副本。唯一前提是请求体能
+      // 无损当成 UTF-8 文本送——这里用「严格解码 + 再编码比对」判定，
+      // 二进制体（图片/压缩流/加密块）会因解码失败或字节不一致而回退到
+      // base64 路径，语义不变。
+      final inlineScript = _buildInlineSmallBodyScript(requestBytes);
+      if (inlineScript != null) {
+        return _RequestBodyPlan(
+          script: inlineScript,
+          shape: _BodyShape.inlineSmall,
+        );
+      }
+
       final bodyBase64 = base64Encode(requestBytes);
       return _RequestBodyPlan(
         script:
@@ -1578,6 +1600,44 @@ document.close();
     return builder.isEmpty ? null : builder.takeBytes();
   }
 
+  /// D10: 把小请求体内联成 JS 字符串字面量脚本；不适用时返回 null。
+  ///
+  /// 适用条件（全部满足才内联）：
+  /// 1. 体量 ≤ [WebViewBridgeDiagnostics.requestBodyInlineMaxBytes]；
+  /// 2. 字节可被严格 UTF-8 解码（无非法序列）；
+  /// 3. 解码后再编码与原始字节完全一致（排除「能解码但非规范文本」的体，
+  ///    例如含孤立代理项或非规范编码的二进制块）。
+  ///
+  /// 三条保证内联后的字符串与原字节语义等价，因此不会改变请求内容；
+  /// 任何一条不满足就回退 base64 路径。
+  ///
+  /// 注意：这里只改变「请求体如何跨桥送达」，不触碰任何 WebView
+  /// 挂起/暂停 API，也不改变 JS 执行时机。
+  String? _buildInlineSmallBodyScript(Uint8List requestBytes) {
+    if (requestBytes.length >
+        WebViewBridgeDiagnostics.requestBodyInlineMaxBytes) {
+      return null;
+    }
+    final String bodyText;
+    try {
+      bodyText = utf8.decode(requestBytes);
+    } catch (_) {
+      return null;
+    }
+    final roundTrip = utf8.encode(bodyText);
+    if (roundTrip.length != requestBytes.length) {
+      return null;
+    }
+    for (var i = 0; i < roundTrip.length; i++) {
+      if (roundTrip[i] != requestBytes[i]) {
+        return null;
+      }
+    }
+    // jsonEncode 负责全部转义（引号/反斜杠/换行/控制字符），
+    // JS 侧拿到的是可直接赋值的字符串字面量。
+    return 'fetchOptions.body = ${jsonEncode(bodyText)};';
+  }
+
   Map<String, String> _buildBrowserSafeHeaders(Map<String, dynamic> headers) {
     final headersMap = <String, String>{};
     final droppedHeaders = <String>[];
@@ -1734,7 +1794,7 @@ class _RequestBodyPlan {
 }
 
 /// 请求体在桥上的传输形态，供 D1/D3 聚合归因（不影响行为）。
-enum _BodyShape { none, direct, streamBridge, base64 }
+enum _BodyShape { none, direct, streamBridge, base64, inlineSmall }
 
 enum _WebViewCookieMode { sync, readOnly, none }
 

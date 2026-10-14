@@ -201,6 +201,31 @@ class WebViewBridgeDiagnostics {
   /// 一次全量 WV cookie 枚举 + 边界同步。
   int cookieBackSyncDeduped = 0;
 
+  /// D10: 因「小请求体直接内联 JS 字面量」而省下的整包 base64 往返次数。
+  ///
+  /// 动机（活跃刷帖发热）：改前非流式请求体一律走
+  /// `base64Encode(bytes)` → `jsonEncode(base64)` 嵌进脚本 → JS 侧
+  /// `atob()` 解码 → `Uint8Array.from()` 逐字节还原。这是桥里最重的
+  /// 请求侧序列化路径：一次请求体在 Dart 侧编码、JS 侧解码，两端各一份
+  /// 完整副本，且 `Uint8Array.from(atob(x), cb)` 是逐字符回调。
+  ///
+  /// 活跃刷帖时点赞/回复/上报等写请求密集，请求体普遍很小（几十~几百字节），
+  /// 走 base64 桥纯属杀鸡用牛刀。改后小体量请求体直接以 JSON 字符串字面量
+  /// 内联进脚本（`fetchOptions.body = "..."`）——Dart 的 `jsonEncode` 已经
+  /// 负责转义，JS 侧零解码、零回调、零额外副本。每 +1 表示省下一次整包
+  /// base64 编解码往返。
+  ///
+  /// 阈值以内的体量才内联；超过阈值仍走 base64（大 body 内联会让脚本本身
+  /// 膨胀，得不偿失）。阈值只影响「怎么送」，不影响「送什么」。
+  int requestBodyInlineSmall = 0;
+
+  /// D10: 小请求体内联的字节阈值。
+  ///
+  /// 取值依据：活跃刷帖的写请求体（点赞/回复/浏览上报/CSRF 表单）实测都在
+  /// 数百字节量级；4KB 覆盖绝大多数写请求，同时保证内联脚本本身不会大到
+  /// 让 `evaluateJavascript` 的源码传输成为新瓶颈。
+  static const int requestBodyInlineMaxBytes = 4096;
+
   /// D2: 新的 WebView 会话建立/销毁时复位（新存储 = 需重新同步）。
   void resetCookieBoundarySync() {
     cookieBoundarySynced = false;
@@ -245,6 +270,7 @@ class WebViewBridgeDiagnostics {
     primingDeduped = 0;
     cookieSweepsSkippedForImage = 0;
     cookieBackSyncDeduped = 0;
+    requestBodyInlineSmall = 0;
     _variantCounts.clear();
   }
 }
