@@ -18,6 +18,7 @@ import '../../windows_webview_environment_service.dart';
 import '../webview/webview_adapter_settings_service.dart';
 import 'adapter_log_metadata.dart';
 import 'webview_bridge_diagnostics.dart';
+import 'webview_bridge_gate.dart';
 import 'webview_bridge_probe.dart';
 
 /// WebView HTTP 适配器
@@ -252,6 +253,9 @@ document.close();
   ) async {
     setRequestAdapterLogName(options, 'webview');
     _activeFetches++;
+    // D13: 桥并发闸门——超出上限的请求在 Dart 侧排队，避免一起涌进单条 JS 线程。
+    // 等待只发生在 Dart 的 Completer 队列上，不触碰任何 WebView 挂起/暂停 API。
+    await WebViewBridgeGate.instance.acquire();
     // D12: 活跃期并发/耗时探针（只计数，不改行为）。
     WebViewBridgeProbe.instance.onRequestStart();
 
@@ -599,6 +603,8 @@ document.close();
       _activeFetches--;
       // D12: 记录本次在飞时长并收敛并发计数。
       WebViewBridgeProbe.instance.onRequestEnd(totalWatch.elapsed);
+      // D13: 释放桥名额（必须在 onRequestEnd 之后，保证在飞时长含排队时间）。
+      WebViewBridgeGate.instance.release();
       if (_activeFetches == 0 && _disposeWhenIdle) {
         close(force: false);
       }
@@ -843,6 +849,11 @@ document.close();
 
     bridge.done.whenComplete(() {
       bridgeStats.streamResponseBytes += bridge.bytesReceived;
+      // D13: 同源图片走桥时的响应字节单独归因，用于对比 D2 分流收益。
+      if (options.extra[resourceKindExtraKey]?.toString() ==
+          resourceKindImage) {
+        bridgeStats.imageResponseBytes += bridge.bytesReceived;
+      }
       _setNetworkLogField(options, 'webViewBinaryBytes', bridge.bytesReceived);
       _setNetworkLogField(
         options,

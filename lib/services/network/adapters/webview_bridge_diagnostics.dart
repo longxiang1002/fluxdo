@@ -29,6 +29,12 @@ class WebViewBridgeDiagnostics {
   int streamResponses = 0;
   int streamResponseBytes = 0;
 
+  /// D13: 其中「同源图片」走桥时的响应字节量（[streamResponseBytes] 的子集）。
+  ///
+  /// 用于对比 D2（同源图片分流到原生 Dio）的收益：若这个数字很大，
+  /// 说明分流前的桥负载主要来自图片；分流后它应趋近 0。
+  int imageResponseBytes = 0;
+
   /// 请求体形态聚合：base64 fallback（arrayBuffer→base64→Dart 解码）次数。
   /// 这是桥里最重的序列化路径，D3 优化是否值得做以它为据。
   int requestBodyBase64 = 0;
@@ -250,6 +256,7 @@ class WebViewBridgeDiagnostics {
     textResponseBytes = 0;
     streamResponses = 0;
     streamResponseBytes = 0;
+    imageResponseBytes = 0;
     requestBodyBase64 = 0;
     requestBodyStreamBridge = 0;
     requestBodyDirect = 0;

@@ -9,6 +9,7 @@ import '../services/network/adapters/apple_transport_policy.dart';
 import '../services/network/adapters/platform_adapter.dart';
 import '../services/network/adapters/webview_bridge_diagnostics.dart';
 import '../services/network/adapters/webview_bridge_probe.dart';
+import '../services/network/adapters/webview_bridge_gate.dart';
 import '../services/network/doh/doh_route_diagnostics.dart';
 import '../services/network/doh/network_settings_service.dart';
 import '../services/network/proxy/gateway_upstream.dart';
@@ -43,6 +44,7 @@ class _Ios14NetworkDiagnosticsPageState
   final _proxyService = ProxySettingsService.instance;
   final _bridge = WebViewBridgeDiagnostics.instance;
   final _probe = WebViewBridgeProbe.instance;
+  final _gate = WebViewBridgeGate.instance;
   final _diag = Ios14Diagnostics.instance;
   bool _testing = false;
   String _dnsResult = '尚未测试';
@@ -388,6 +390,26 @@ class _Ios14NetworkDiagnosticsPageState
               _probe.reset();
             }),
             child: const Text('重置活跃期桥负载探针（刷帖前清零）'),
+          ),
+          const Divider(height: 24),
+          Text('桥并发闸门（D13）', style: Theme.of(context).textTheme.titleSmall),
+          Text('当前在飞：${_gate.inFlight} / 上限 ${_gate.maxConcurrent} 个桥请求'),
+          Text('排队峰值：${_gate.peakWaiting} 个请求曾同时在闸门外等待'),
+          Text(
+            '累计排队：${_gate.queuedTotal} 次'
+            '（这个数字就是闸门实际拦下的并发洪峰规模）',
+          ),
+          const Text(
+            '判读：累计排队明显 > 0 且平均在飞时长下降 → 限流生效，'
+            '可继续下调上限（4→3→2）找最优；排队为 0 → 活跃期并发本就不高，'
+            '限流无收益，转查 CF 刷新重建频率或响应侧序列化。'
+            '闸门只在 Dart 侧排队，不挂起 WebView、不阻塞 JS 执行。',
+          ),
+          OutlinedButton(
+            onPressed: () => setState(() {
+              _gate.reset();
+            }),
+            child: const Text('重置桥并发闸门计数'),
           ),
           const Text(
             '说明：边界同步（sweepAll）会对每个 cookie 名做多次原生 cookie 库往返，'
