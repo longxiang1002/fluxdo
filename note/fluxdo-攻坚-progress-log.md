@@ -3,6 +3,34 @@
 > 格式：`北京时间 | 本轮改动 | commit | CI 状态 | 下一步`
 > 时间一律北京时间（UTC+8）。
 
+## 2026-10-14 01:00 CST | 修复 run #50 format 失败（路径D D1 量化后续）
+
+**CI 前置核对（强制第 0 步）**：
+- run **#49**（`4ff93fd2` id `38419132192`）= ✅ success（已出包 `ios14-test-49`）；
+- run **#48** = ✅ success；
+- run **#50**（`cf917903` id `38429318945`）= ❌ **failure** ← 本轮第一优先级。
+  拉 job 日志定位（job `115407026971`）：STEP7「格式与静态分析」dart format 未通过 —
+  `Formatted 40 files (1 changed) exit 1`，changed 文件 = `lib/services/network/adapters/webview_bridge_diagnostics.dart`。
+  根因：commit `4b29c390`（D1 量化画像）引入该文件时**未跑 dart format 就 push**，
+  与历史 lesson（run #35 同理）——格式失败无 IPA 无 Release 且整夜无人发现。
+
+**本轮改动**（commit `5edc50f7`，1 文件 +2/-3，纯格式化）：
+- `lib/services/network/adapters/webview_bridge_diagnostics.dart`：用 CI 同款 Dart 3.12.0
+  （`/tmp/dartsdk312/dart-sdk/bin/dart format`）格式化 —— 仅 static field 行宽折叠 + 补文件尾换行，
+  **零逻辑变更**。
+- 修复后 format 预检：`git diff e1bd839e HEAD -- '*.dart'` → 40 files **0 changed exit 0** ✅。
+
+**提交/推送/触发**：
+- push `fix/ios14-network-thermal` → 成功（`cf917903..5edc50f7`）。
+- 重新触发 workflow（`APP_VERSION_SUFFIX` 仍 `013`）→ run **#51**（`5edc50f7` id `38436258785`）。
+
+**CI 状态**：#51 in_progress（本轮 01:00 触发），**待出包确认** → 期望 Release `ios14-test-50`（`0.2.28.013`）。
+
+**下一步**：#51 出包后，老板实机装包 → 诊断页「重置桥统计」→ 刷帖 5–10 分钟
+→ 读「图片同源 vs API」请求数/字节量作为 **D2** 判据；若图片同源为主则试 D2 分流到原生 Dio 直连。
+
+---
+
 ## 2026-10-13 05:30 CST | DoH 发热路径 C：干掉常驻悬浮性能面板（每秒重建 + 1Hz CPU 采样）
 
 **结论（先证据后改动）**：上一轮（05:00）修掉 `SystemProxyService` 的 10s 常驻轮询后，
@@ -1262,3 +1290,231 @@ Rust 侧比对确认本地 `proxy.rs` 脏状态 == `patches/0001-*.patch`（路�
    - `_iosIdleDisposeDelay` 5min → 收紧（现有更安全基础：休眠不再原地重建）；
    - DoH 出口探针（`probeEffectiveProxy` / `dohEgressVerified`）采样频率。
 3. SS 代理接管内置浏览器（并行方向；`patches/WIP-0002-system-proxy-adaptive-backoff.txt` 为在途草稿）。
+
+---
+
+## 2026-10-14 02:00 CST — 修复 run#52 step8 analyze failure（路径D D1 量化遗留）
+
+### CI 前置核对（强制第 0 步）
+最近 3 个 run 全部 failure：
+- **#52** `5edc50f7`(id 38439814173) STEP8 **dart analyze** 挂：
+  `webview_http_adapter.dart:514:25`、`:764:23` 两处 `unnecessary_null_comparison`
+  （"The operand can't be 'null', so the condition is always 'true'"），`--fatal-infos` → failure。
+  注意 `dart format` 实际已 0 changed 通过，失败点是 analyze，不是 format。
+- **#51** `5edc50f7`(id 38436258785) 同样 analyze 挂。
+- **#50** `cf917903`(id 38429318945) STEP7 format 挂（已被 5edc50f7 修 format）。
+→ 存在未修复 failure，本轮第一优先级修 analyze。
+
+### 本轮改动 commit `043f0d71`
+`webview_http_adapter.dart` 删掉 2 处冗余 `if (jsEvalElapsed != null)` 判断
+（flow analysis 证明该分支非 null：赋值在 try 内 evaluateJavascript 成功后、catch rethrow，
+到计数行必非 null）。纯删死代码，不改分流/桥行为，D1 画像语义不变。
+
+### 本地验证
+- CI 同款 diff 预检（base e1bd839e → HEAD）：40 files **0 changed，exit 0** ✅
+- 本地 dart analyze 容器内崩溃（既有 2C/3.7G 限制），靠 CI STEP8 把关。
+
+### CI
+push `043f0d71` 成功；dispatch run（`APP_VERSION_SUFFIX` 保持 `013`）→ **#53**，待出包。
+
+### 下一步
+1. 核对 run **#53**：期望 STEP8 通过 + 出包 + Release `ios14-test-53`（`0.2.28.013`）。
+2. 老板实机：诊断页「重置桥统计」→ 刷帖 → 读图片同源 vs API 请求/字节量 → **D2 判据**。
+3. 若图片同源占多数 → 试 D2 图片分流（skipWebViewAdapter → 原生直连，验证 CF 403 是否升高）。
+
+---
+
+## 2026-10-14 05:00 CST — onResponse 响应 cookie 批量 sweep（D3 活跃负载降开销）
+
+### CI 前置核对（强制第 0 步）
+- **#54** `4dd74f36`(id 38466065999) 启动即 in_progress，本轮回报时仍未出包 → 交下一轮核对。
+- **#53** `043f0d71` = ✅ **success**；Release **`ios14-test-53`** 已在
+  （`fluxdo-ios14-test-53-043f0d71.ipa` 54,879,229B，`0.2.28.013`）✅。
+- **#52** = ❌ failure（analyze，已被 #53 修复）。
+- → 无未修复 failure、无缺 Release；#54 未失败，本轮可推进。
+
+### 本轮改动（commit `90e2fa42`）
+新增 `SessionCookieSentinel.sweepMany(url, targets, {force})`：
+- 语义与逐个 [sweep] **完全一致**（1s 节流 / per-name 锁 / delete 分支全保留），
+  唯一区别 = **变体计数批量预取**：一次 `countCookiesByNames`（原生一次
+  `getAllCookies` 枚举）注入各 name 的 `variantsBeforeOverride`。
+- 只对「非节流命中的 ensureUnique」name 预取，贴近原语义。
+
+`app_cookie_manager.dart` `onResponse`：把「逐 cookie `sweep` + `Future.wait`」
+改为一次 `sweepMany`。证据：活跃刷帖时每个响应带若干 Set-Cookie
+（session-token / _t / LDC …），逐个 sweep = 「响应 cookie 数」次全量枚举 +
+跨语言往返，同步阻塞在响应路径上 → 与请求本身无关的固定桥开销。
+
+### 本地验证（CI 同款工具链 Dart 3.12.0）
+- `dart format --set-exit-if-changed`（HEAD）：2 files **0 changed，exit 0** ✅。
+- 语义核对：`variantsBeforeOverride` 为 null（节流/未预取）时 sweep 内部自行读，
+  行为等价；批量成功且计数为 0 时传 0，正确不触发多余枚举。
+
+### CI
+push `90e2fa42` 成功；dispatch（`APP_VERSION_SUFFIX` 014→**015**）→ **#55**，待出包。
+
+### 下一步
+1. 核对 run **#54** / **#55**：期望 STEP8 通过 + 出包 + Release（`0.2.28.014` / `0.2.28.015`）。
+2. 老板实机：诊断页「重置桥统计」→ 刷帖 → 读图片同源 vs API 请求/字节量 → **D2 判据**。
+3. 若图片同源占多数 → 试 D2 图片分流（skipWebViewAdapter → 原生直连，验证 CF 403 是否升高）。
+
+## 2026-10-14 06:00 CST — 路径D2：同源图片分流原生直连（活跃负载降开销）
+
+### 开工核对（强制）
+- #55 `90e2fa42` = ✅ success，Release `ios14-test-54` 已出（0.2.28.014）✅
+- #54 `4dd74f36` = ✅ success，Release `ios14-test-53` 已出 ✅
+- 无未修复 failure、无缺 Release → 可推进。
+
+### 本轮改动（commit `e35f7aae`）
+D2 落地：同源静态图片（resourceKindImage）从 WebView 桥分流到原生 Dio 直连。
+- `platform_adapter.dart`：新增顶层开关 `imageNativeRoutingEnabled`（默认 true）；
+  `requestCanUseWebViewAdapter` 的 image 分支在开关开启时直接 `return false`
+  （→ 走 `_inner` 原生栈），并 `WebViewBridgeDiagnostics.imageRoutedNative++` 计数。
+- `webview_bridge_diagnostics.dart`：新增 `imageRoutedNative` 计数 + reset 清零。
+- `ios14_network_diagnostics_page.dart`：report 增 `imageRoutedNative`；界面在 >0 时
+  显示「同源图片已分流原生直连：N 次」。
+- 回退路径：置 `imageNativeRoutingEnabled = false` 即恢复旧行为（一行，无需改调用方）；
+  `skipWebViewAdapter` 仍是最高优先级强制原生开关。
+
+### 依据
+- 图片是刷帖时体量最大的走桥负载：每响应经「JS fetch → WebMessageChannel 分块回传」
+  跨桥（:605 sendBuffer / :1182 fallback base64）。CF Bot Management 拦的是
+  导航/API 的 challenge，静态图片不参与指纹判定 → 分流不破坏过盾。
+- ⚠️ 待实机验证：若出现 CF 403/拦截率升高，立即回退开关并在日志写明数据。
+
+### 本地验证（CI 同款工具链 Dart 3.12.0）
+- `dart format --set-exit-if-changed`：3 files **0 changed，exit 0** ✅。
+- `dart analyze`：本地 analysis server 对两文件崩溃（**基线同样崩溃**，属本机环境问题，
+  非改动引入；webview_bridge_diagnostics.dart 单独 analyze 通过）。CI 侧为准。
+
+### CI
+push `e35f7aae` 成功；dispatch（`APP_VERSION_SUFFIX` 015→**016**）→ **#56**（pending）。
+
+### 下一步
+1. 核对 run **#56**：期望 success + Release `ios14-test-56`（0.2.28.016）。
+2. 老板实机：诊断页「重置桥统计」→ 刷帖 → 看「同源图片已分流原生直连 N 次」
+   与发热是否下降；同时留意 CF 403/拦截率。
+3. 若 403 升高 → 回退 `imageNativeRoutingEnabled=false`；否则继续 D3（桥内降开销）。
+
+## 2026-10-14 07:00 CST — 路径D3：变体计数缓存复用（活跃负载降开销）
+
+### 开工核对（强制）
+- #56 `e35f7aae` = ✅ success（全 15 步绿），Release `ios14-test-56` 已出（0.2.28.016）✅
+- #55 `90e2fa42` = ✅ success；#54 `4dd74f36` = ✅ success。
+- 无未修复 failure、无缺 Release → 可推进。
+
+### 本轮改动（commit `a10b2e85`）
+D3：同一批 sweep 内复用「刚读到的」变体计数，省掉重复的全量枚举。
+- `webview_bridge_diagnostics.dart`：新增 `_variantCounts` 缓存（name→int）+ 
+  `cachedVariantCount`/`rememberVariantCount`/`invalidateVariantCounts` +
+  `variantCountCacheHits` 计数；`markWvCookieMutated`/`resetCookieBoundarySync`
+  内部一并作废缓存。
+- `session_cookie_sentinel.dart`：`sweepAll`/`sweepMany` 批量取数后
+  `rememberVariantCount`；`_sweepInternal` 优先读缓存（命中 `++`），未命中才
+  原生读取；收敛后 `after` 写回缓存；`_executeDelete` 删到 cookie 时作废缓存。
+- `ios14_network_diagnostics_page.dart`：report + 界面显示「变体计数缓存复用 N 次」。
+- 正确性：任何 WV cookie 集合变更都作废缓存，未命中路径与旧行为逐字一致。
+- 硬性禁令遵守：无 pauseTimers/resumeTimers，无滚动挂起。
+
+### 依据
+`sweepAll` 先 `countCookiesByNames`（1 次全量枚举）拿 N 个计数，随后
+`_sweepInternal` 对每个 name **又**各读一次 `countCookiesByName`（iOS 原生 =
+又一次 `getAllCookies` 全量枚举 + 跨语言序列化）→ 同一批 name 枚举两遍。
+
+### 本地验证（CI 同款 Dart 3.12.0）
+- `dart format --set-exit-if-changed`：3 files **0 changed，exit 0** ✅。
+
+### CI
+push `a10b2e85` 成功；dispatch（`APP_VERSION_SUFFIX` 016→017）→ **#57**（pending）。
+
+### 下一步
+1. 核对 run #57：期望 success + Release `ios14-test-57`（0.2.28.017）。
+2. 老板实机：诊断页「重置桥统计」→ 刷帖 → 看图片分流 N 次 + 缓存复用 N 次 + 发热。
+3. 若 D2 图片分流致 CF 403 升高 → 回退 `imageNativeRoutingEnabled=false`。
+
+## 2026-10-14 10:00 CST — 路径D4：边界同步延后收敛（活跃请求路径摘掉 sweepAll）
+
+### 开工核对（强制第 0 步）
+- **#59** `41258cd6`(id 38487988910) = ✅ **success**，全 15 步绿；
+  Release **`ios14-test-59`** 已出（0.2.28.017，IPA 54.9MB）✅。
+- **#58** `950fba59` = ❌ failure（step8 analyze：`session_cookie_sentinel.dart:583`
+  裸 `stats`）→ **已被 #59 修复**（`41258cd6` 显式 instance），无遗留。
+- **#57** = ❌ failure（同类 analyze，已被 #58 修）→ 无未修复 failure、无缺 Release。
+- → 本轮可推进。
+
+### 本轮改动（commit `98f27565`）
+D4：把「WV cookie 变化 → 立刻作废边界同步状态 → 下一个走桥请求在**自身请求
+路径上**同步跑 sweepAll」改成「变化只标记待收敛，由已在跑的 500ms debounce
+在请求路径之外统一 sweep」。
+- `cookie_store_observer.dart`：`_onCookiesChanged()` 不再直接 `markWvCookieMutated()`
+  （那会立刻把 `cookieBoundarySynced` 置 false），改为
+  `WebViewBridgeDiagnostics.instance.markResyncPending()`；`_doSweep()` 开头
+  无条件 `clearResyncPending()`（debounce 到期即视为已收敛）。
+- `webview_bridge_diagnostics.dart`：新增 `cookieResyncPending` 状态 +
+  `cookieSweepsDeferred` 计数 + `markResyncPending()`/`clearResyncPending()`；
+  `resetCookieBoundarySync()` 一并复位；`reset()` 一并清零。
+- `webview_http_adapter.dart`：`!cookieBoundarySynced` 分支里，若
+  `cookieResyncPending` 为真 → `cookieSweepsDeferred++` 并**跳过** sweepAll
+  （变化由 debounce 收敛）；否则维持原行为。
+- `ios14_network_diagnostics_page.dart`：report + 界面显示「边界同步延后收敛 N 次」。
+- **正确性**：sweep 本就是最终一致的兜底，延后一个 debounce 窗口不改变任何
+  同步/删除语义；窗口内请求用的仍是 jar↔WV 已就绪的 cookie 集（prime 幂等）。
+- **硬性禁令遵守**：未触碰任何 WebView 挂起/暂停 API，无 pauseTimers/resumeTimers，
+  不阻塞 JS 执行。
+
+### 依据
+`AppDelegate.swift:856 cookiesDidChange` → channel `onCookiesChanged` →
+`cookie_store_observer.dart:_onCookiesChanged()`。改前它直接
+`markWvCookieMutated()` → `cookieBoundarySynced=false` → **下一个走桥请求**
+在请求路径上跑 `sweepAll`（O(cookie 数) 次 `getAllCookies` 全量枚举 + 跨语言
+往返）。刷帖时 CF 持续轮换/下发 cookie，等于每个请求都背一次边界同步——
+这是活跃负载下与请求本身无关的固定桥开销。
+
+### 本地验证（CI 同款工具链 Dart 3.12.0）
+- `dart format --output=none --set-exit-if-changed`：4 files **0 changed，exit 0** ✅。
+- `dart analyze`：本机 analysis server 对 3/4 文件崩溃（**基线同样崩溃**，
+  已用 `git stash` 对照验证，属本机环境问题，非改动引入）。CI 侧为准。
+
+### CI
+push `98f27565` + `483a18f1`（`APP_VERSION_SUFFIX` 017→**018**）→ **#60**（in_progress，id 38501025713）。
+
+### 下一步
+1. 核对 run **#60**：期望 success + Release `ios14-test-60`（0.2.28.018）。
+2. 老板实机：诊断页「重置桥统计」→ 刷帖 → 看「边界同步延后收敛 N 次」+
+   「同源图片已分流原生直连 N 次」+ 发热是否下降。
+3. 若 D2 图片分流致 CF 403 升高 → 回退 `imageNativeRoutingEnabled=false`。
+
+---
+
+## 2026-10-14 12:00（北京时间）· 轮次：修 run#60 → 出包 #61
+
+### 0) 上轮 CI 核对（强制）
+- 查最近 3 次 run：
+  - **#60** `483a18f1` — **failure**（2026-10-14 10:26 北京）→ 本轮第一优先级修复。
+  - #59 `41258cd6` — success（有 Release）。
+  - #58 `950fba59` — failure（已修）。
+- **#60 失败定位**（拉 job 日志 `/tmp/run60.log`）：
+  - 失败 step = **8「格式与静态分析」**，exit code 2。
+  - `dart format` 通过（45 files, **0 changed**）；失败在 `dart analyze --fatal-infos`：
+    `warning - cookie_store_observer.dart:52:25 - The value of the field '_resyncWindow' isn't used. - unused_field`
+  - 即上一轮 D4 改动删掉了 `_resyncWindow` 的**全部引用**，但常量声明本身没删（工作区已删，未提交）。
+  - 无 IPA、无 Release（step 10~15 全 skipped）。
+
+### 2) 本轮改造
+- **修复**：提交工作区已就绪的删除——`cookie_store_observer.dart` 移除未引用的
+  `static const Duration _resyncWindow = Duration(milliseconds: 500);`
+  （收敛窗口统一用 `_debounceWindow`，注释已同步说明）。
+- 本地预检（CI 同款 Dart 3.12.0）：`dart format --output=none --set-exit-if-changed` → **0 changed, exit 0** ✅。
+- `dart analyze` 本机 analysis server 崩溃（`git stash` 对照确认**基线同样崩溃**，属本机环境问题），以 CI 为准。
+
+### 3) 提交与 CI
+- commit `a2066c6c`：`fix(ios14): 修复 run#60 step8 analyze——移除未被引用的 _resyncWindow 常量（unused_field）`
+- push → `fix/ios14-network-thermal`（`483a18f1..a2066c6c`）
+- 触发 workflow → **run #61**（id `38509271673`，`APP_VERSION_SUFFIX` 仍为 018）。
+- 轮内实测：**step 8 格式与静态分析 success ✅**，**step 9 iOS14 兼容与 CF 回归测试 success ✅**，
+  step 10 构建 IPA 进行中。
+
+### 下一步
+1. 等 #61 出包 → 确认 Release `ios14-test-61`（0.2.28.018）+ IPA 直链。
+2. 老板实机验证 D4（边界同步延后收敛）+ D2（同源图片分流原生）对活跃发热的影响。
+3. 若 #61 成功，下一轮回到主线：继续找「活跃负载」发热源（D1 量化走桥请求数/字节量）。
