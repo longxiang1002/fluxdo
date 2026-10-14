@@ -734,24 +734,74 @@ document.close();
             }
           };
 
+          // D14: 把 reader 的小 chunk 在 JS 侧合并成较大的消息再跨桥回传。
+          // 每个 postMessage 都要跨一次 JS↔native 边界(结构化克隆/转移 +
+          // Dart 侧回调派发)，活跃刷帖时大图会以许多小 chunk 到达，
+          // 边界穿越次数与 chunk 数同阶 → CPU 峰值叠加。
+          // 合并到 COALESCE_TARGET 再发，可把消息数压到约 1/N，
+          // 语义与字节序完全不变(仍是同一段连续字节，只是分批粒度更粗)。
+          const COALESCE_TARGET = 65536;
+          let pending = null;
+          let pendingLen = 0;
+          let rawChunks = 0;
+          let sentMessages = 0;
+
+          const flushPending = function() {
+            if (!pending || pendingLen === 0) return;
+            // 必须让 out 独占一块恰好 pendingLen 的 ArrayBuffer：postMessage
+            // 转移的是整个 buffer，若沿用 64KB 大缓冲会把尾部未用字节一并送出。
+            const out = new Uint8Array(pendingLen);
+            out.set(pending.subarray(0, pendingLen));
+            pending = null;
+            pendingLen = 0;
+            sentMessages++;
+            sendBuffer(out.buffer);
+          };
+
+          const pushChunk = function(value) {
+            if (!value || value.byteLength === 0) return;
+            rawChunks++;
+            let src = value;
+            if (value.byteOffset !== 0 || value.byteLength !== value.buffer.byteLength) {
+              src = value.slice();
+            }
+            if (!pending) {
+              pending = new Uint8Array(COALESCE_TARGET);
+              pendingLen = 0;
+            }
+            let offset = 0;
+            while (offset < src.byteLength) {
+              const room = COALESCE_TARGET - pendingLen;
+              const take = Math.min(room, src.byteLength - offset);
+              pending.set(src.subarray(offset, offset + take), pendingLen);
+              pendingLen += take;
+              offset += take;
+              if (pendingLen >= COALESCE_TARGET) {
+                flushPending();
+                pending = new Uint8Array(COALESCE_TARGET);
+                pendingLen = 0;
+              }
+            }
+          };
+
           if (response.body && response.body.getReader) {
             const reader = response.body.getReader();
             while (true) {
               const chunk = await reader.read();
               if (chunk.done) break;
-              const value = chunk.value;
-              if (!value || value.byteLength === 0) continue;
-              let buffer = value.buffer;
-              if (value.byteOffset !== 0 || value.byteLength !== buffer.byteLength) {
-                buffer = value.slice().buffer;
-              } else {
-                buffer = buffer.slice(0);
-              }
-              sendBuffer(buffer);
+              pushChunk(chunk.value);
             }
+            flushPending();
           } else {
             sendBuffer(await response.arrayBuffer());
           }
+
+          responsePort.postMessage(JSON.stringify({
+            kind: 'coalesceStats',
+            requestId: requestId,
+            rawChunks: rawChunks,
+            sentMessages: sentMessages
+          }));
 
           responsePort.postMessage(JSON.stringify({
             kind: 'complete',
@@ -931,6 +981,15 @@ document.close();
           bridge.completeHeaders(_BinaryResponseHeaders.fromJson(decoded));
         } else if (kind == 'complete') {
           bridge.complete();
+        } else if (kind == 'coalesceStats') {
+          // D14: JS 侧合并统计——原始 chunk 数 vs 实际发出的跨桥消息数。
+          final raw = decoded['rawChunks'];
+          final sent = decoded['sentMessages'];
+          if (raw is num && sent is num) {
+            final stats = WebViewBridgeDiagnostics.instance;
+            stats.streamRawChunks += raw.toInt();
+            stats.streamCoalescedMessages += sent.toInt();
+          }
         } else if (kind == 'error') {
           bridge.completeError(
             DioException(

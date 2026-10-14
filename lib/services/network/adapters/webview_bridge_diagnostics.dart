@@ -35,6 +35,21 @@ class WebViewBridgeDiagnostics {
   /// 说明分流前的桥负载主要来自图片；分流后它应趋近 0。
   int imageResponseBytes = 0;
 
+  /// D14: 二进制流在 JS 侧合并前的原始 chunk 总数。
+  ///
+  /// 每个原始 chunk 本会各自触发一次 `postMessage` 跨 JS↔native 边界；
+  /// 合并后实际发出的消息数见 [streamCoalescedMessages]。两者之比
+  /// 就是本轮省下的跨语言边界穿越批数。
+  int streamRawChunks = 0;
+
+  /// D14: 二进制流在 JS 侧合并后实际发出的消息数（跨桥回传批数）。
+  int streamCoalescedMessages = 0;
+
+  /// D14: 因 JS 侧合并而省下的跨桥消息数（[streamRawChunks] - [streamCoalescedMessages]）。
+  int get streamMessagesSaved => streamRawChunks > streamCoalescedMessages
+      ? streamRawChunks - streamCoalescedMessages
+      : 0;
+
   /// 请求体形态聚合：base64 fallback（arrayBuffer→base64→Dart 解码）次数。
   /// 这是桥里最重的序列化路径，D3 优化是否值得做以它为据。
   int requestBodyBase64 = 0;
@@ -257,6 +272,8 @@ class WebViewBridgeDiagnostics {
     streamResponses = 0;
     streamResponseBytes = 0;
     imageResponseBytes = 0;
+    streamRawChunks = 0;
+    streamCoalescedMessages = 0;
     requestBodyBase64 = 0;
     requestBodyStreamBridge = 0;
     requestBodyDirect = 0;

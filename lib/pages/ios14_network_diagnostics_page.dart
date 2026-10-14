@@ -201,6 +201,9 @@ class _Ios14NetworkDiagnosticsPageState
       'cookieBatchCountNames': s.cookieBatchCountNames,
       'variantCountCacheHits': s.variantCountCacheHits,
       'imageRoutedNative': s.imageRoutedNative,
+      'streamRawChunks': s.streamRawChunks,
+      'streamCoalescedMessages': s.streamCoalescedMessages,
+      'streamMessagesSaved': s.streamMessagesSaved,
       'cookieSweepsDeferred': s.cookieSweepsDeferred,
       'textBodyUnescaped': s.textBodyUnescaped,
       'textBodyUnescapedBytes': s.textBodyUnescapedBytes,
@@ -410,6 +413,22 @@ class _Ios14NetworkDiagnosticsPageState
               _gate.reset();
             }),
             child: const Text('重置桥并发闸门计数'),
+          ),
+          const Divider(height: 24),
+          Text('JS 侧分块合并（D14）', style: Theme.of(context).textTheme.titleSmall),
+          Text(
+            '原始 chunk：${_bridge.streamRawChunks} 个'
+            ' → 合并后跨桥消息：${_bridge.streamCoalescedMessages} 条',
+          ),
+          Text(
+            '省下的跨桥消息：${_bridge.streamMessagesSaved} 条'
+            '（每条本都要跨一次 JS↔native 边界 + Dart 回调派发）',
+          ),
+          const Text(
+            '判读：原始 chunk 远多于合并后消息 → 合并生效，活跃刷帖时大图回传的'
+            '边界穿越批数被显著压下；两者接近 → 响应 chunk 本就很大（或走 base64 '
+            'fallback），合并无收益，转查响应侧序列化。合并只发生在 JS 侧，'
+            '不挂起 WebView、不阻塞 JS 执行，字节序与语义完全不变。',
           ),
           const Text(
             '说明：边界同步（sweepAll）会对每个 cookie 名做多次原生 cookie 库往返，'
