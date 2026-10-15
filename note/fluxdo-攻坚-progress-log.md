@@ -2046,3 +2046,178 @@ push `98f27565` + `483a18f1`（`APP_VERSION_SUFFIX` 017→**018**）→ **#60**�
 - 下一步：核对本 run 出包；实机做 D2 A/B（先关分流刷帖对比，再开分流对比发热/
   图片加载/CF 403）；A/B 证实省热且不过盾则固化默认，若 403 则回退并写明数据。
   SS 接管方向与主线交替。
+
+## 2026-10-15 08:00 CST — 阻断：GitHub Actions 被禁用，D19 无法出包
+- 前置核对：#78 `a4f8ac9c` success（BJ 04:17），#77 success，#75 已修；
+  但**最新 commit `eb19dc37`（D19，BJ 07:23 推送）没有任何对应 run** →
+  不是漏触发，是触发被拒。
+- 根因（已实测）：`POST .../actions/workflows/ios14-test.yml/dispatches`
+  返回 **HTTP 422 `Actions has been disabled for this repository.`**
+  矛盾点：仓库级 `GET /actions/permissions` 仍报 `enabled:true`、
+  workflow `state:active`；PAT 正常（rate 4989/5000）。
+  → 判定为**账号级 Actions 禁用**（longxiang1002 为免费 plan，通常因
+  用量超限/滥用检测触发），仓库级 API 不会反映，网页端才会显示。
+- 时间线：Actions 在 BJ 04:17（#78 成功）之后、BJ 07:23（D19 push）之前被禁。
+- 本轮动作：D19 代码本地校验通过（git diff 3 个 dart 文件，
+  `dart format --set-exit-if-changed` = 0 changed exit 0 ✅），代码已在远端
+  `fix/ios14-network-thermal`（eb19dc37），**只差 CI 出包**。
+- 阻断性质：非代码问题，需老板在 GitHub 网页端恢复 Actions
+  （Settings→Actions→General 或账号 Billing/Support 申诉），我无法用 PAT 自行恢复。
+- 下一步：老板恢复 Actions 后，重跑本 dispatch 即可出 D19 包；在此之前
+  后续轮次只能做本地代码改造与静态验证，无法出 IPA。
+
+## 2026-10-15 10:00 CST — D20：活跃发热归因（闸门排队 vs 单请求固定税）+ 阻断未解
+- 前置核对：#78 `a4f8ac9c` success（Release ios14-test-78 / 0.2.28.032），
+  #77 success，#76 已修；**Actions 仍被禁用**（本轮 dispatch 实测再返
+  HTTP 422 `Actions has been disabled for this repository.`），D19(eb19dc37)
+  与 D20(0135b9ec) 均无对应 run。阻断性质同上轮，需老板网页端恢复。
+- 本轮判断：D15/D16/D17 只回答「桥搬了多少 / 贵不贵 / 贵在哪段」，但活跃
+  刷帖发热有两种**互斥**成因，优化方向相反：(a) 并发洪峰排队（闸门满，CPU 花在
+  等待/唤醒/分块回调）→ 对策=下调并发上限或继续分流；(b) 单请求固定税
+  （几乎不排队，但每请求都付跨语言 evaluateJavascript + 分块回传）→ 对策=砍
+  脚本体积/合并调用/减少走桥条数，限流无收益。缺一个把两者分开的判据。
+- 改动（纯派生只读计数，零采样、零新增运行时开销，不碰任何 WebView 挂起 API）：
+  - `webview_bridge_diagnostics.dart`：新增 `gateVsTaxVerdict` getter
+    （排队占比 ≥20% 判「闸门排队主导」；否则平均在飞 ≥250ms 判「固定税主导」；
+    再否则判「桥非主因」）+ 阈值常量 `gateQueueDominantRatio=20`；加
+    `library;` 与 import gate/probe（无环）。
+  - `webview_bridge_probe.dart`：删掉未实际使用的 import（原为文档交叉引用），
+    避免与 diagnostics 反向引用形成循环 import。
+  - `ios14_network_diagnostics_page.dart`：诊断页加 D20 一行展示 + 报告 map 加
+    `gateVsTaxVerdict` 字段。
+  - `ios14-test.yml`：APP_VERSION_SUFFIX 033→**034**。
+- 本地：dart format（CI 同款 3.12.0）3 文件 **0 changed exit 0** ✅；
+  dart analyze 因 2 核 OOM 崩溃（历史已知环境问题）。
+- commit `0135b9ec`；push 成功；dispatch 被 422 拒（Actions 禁用）。
+- 下一步：老板恢复 Actions 后重跑 dispatch 出 D20 包（0.2.28.034）；实机刷帖
+  前后各看一次诊断页，用 D20 判据决定下一步是「下调并发上限」还是「砍脚本」。
+
+## 2026-10-15 11:00 CST — D21：闸门饱和度归因（活跃并发量化）+ 阻断未解
+- 前置核对：#78 `a4f8ac9c` success（Release ios14-test-78 / 0.2.28.032），
+  #77/#76 success；**Actions 仍被禁用**（本轮 dispatch 实测再返 HTTP 422
+  `Actions has been disabled for this repository.`），D19(eb19dc37)/D20(0135b9ec)/
+  D21(31c283fe) 均无对应 run，只差 CI 出包。
+- 本轮判断：D20 用「排队占比」判断限流值不值得做，但排队占比为 0 有两种互斥
+  含义——(a) 并发本就不高（桥非瓶颈）；(b) 并发长期顶在上限、闸门把洪峰削平。
+  两者优化方向相反，缺一个区分量。而 D12 的并发采样只在「有请求在飞」时每秒
+  +1，busyRatio 恒 100%，回答不了「桥有多忙」。
+- 改动（纯派生只读计数，零采样新增、零运行时开销，不碰任何 WebView 挂起 API）：
+  - `webview_bridge_probe.dart`：新增活跃期「在飞数 × 时间」积分
+    `inFlightIntegralMs` + 活跃采样时长 `activeSampledMs`（采样器运行期间每秒
+    累加 `_inFlight*1000`，_stopSampler 按实际毫秒结算尾段），派生
+    `averageActiveConcurrency`。
+  - `webview_bridge_diagnostics.dart`：新增 `gateSaturationVerdict`
+    （平均并发/上限 ≥75% 判饱和 → 限流/分流仍有收益；37.5%~75% 中度占用 →
+    优先分流；<37.5% 远未打满 → 桥非主因，转查渲染/解码/DoH）+ 阈值常量
+    `gateSaturationRatio=0.75`。
+  - `ios14_network_diagnostics_page.dart`：加 D21 展示行 + 探针区「活跃期平均
+    并发」行 + 报告 map 三个字段。
+  - `ios14-test.yml`：APP_VERSION_SUFFIX 034→035。
+- 本地：dart format（CI 同款 3.12.0）3 文件 **0 changed exit 0** ✅；
+  dart analyze 因 2 核 OOM 崩溃（历史已知环境问题）。
+- commit `31c283fe`；push 成功；dispatch 被 422 拒（Actions 禁用）。
+- 下一步：老板恢复 Actions 后重跑 dispatch 出 D21 包（0.2.28.035）；实机刷帖
+  前后各看一次诊断页，用 D21 判据决定「下调闸门上限」还是「转查渲染/DoH」。
+
+## 2026-10-15 12:00 CST — D22：限流实验可执行化（运行时并发上限 A/B）+ 阻断未解
+- 前置核对：#78 `a4f8ac9c` success（Release ios14-test-78 / 0.2.28.032），
+  #77/#76 success，无遗留 failure；**Actions 仍被禁用**（本轮 dispatch 实测再返
+  HTTP 422 `Actions has been disabled for this repository.`），
+  D19(eb19dc37)/D20(0135b9ec)/D21(31c283fe)/D22(c4b97748) 均无对应 run，只差 CI 出包。
+- 本轮判断：D20（排队占比）与 D21（闸门饱和度）各自只回答一半问题，且**单独看会
+  互相打架**——排队高说明闸门已在削峰（再降只会更堵）；饱和度低说明并发本就不高
+  （限流无收益）；只有「饱和度高 + 排队占比低」才是「上限恰好卡住活跃负载」的特征，
+  此时降上限（4→3→2）最有希望。缺一个把两者合成**可执行结论**的判据；且此前每试
+  一档上限都要改代码+重出包，而 CI 又被禁，等于实验做不了。
+- 改动（纯派生只读计数 + 一个运行时开关，零采样、零新增运行时开销，不碰任何
+  WebView 挂起/暂停 API，不阻塞 JS 执行）：
+  - `webview_bridge_diagnostics.dart`：新增 `gateTuningVerdict` getter，把 D20 排队
+    占比与 D21 饱和度合成四种可执行结论（值得做 / 已过头 / 先查排队来源 / 无收益）；
+    加常量 `gateQueueHighRatio`（复用 `gateQueueDominantRatio`=20）。
+  - `webview_adapter_settings_service.dart`：新增 `gateMaxConcurrentNotifier`
+    （默认 4，与 D13 初值一致）+ `setGateMaxConcurrent()`（下限保护 1，避免 0 让
+    所有走桥请求永久排队）；setter 直接写 `WebViewBridgeGate.maxConcurrent`。
+  - `ios14_network_diagnostics_page.dart`：诊断页加 D22 建议行 + 运行时上限
+    ChoiceChip（2/3/4/6，即切即生效）+ 报告 map 加 `gateTuningVerdict` /
+    `gateMaxConcurrent` 两字段 + 监听器注册/注销。
+  - `ios14-test.yml`：APP_VERSION_SUFFIX 035→**036**。
+- 本地：dart format（CI 同款 3.12.0）3 文件 **0 changed exit 0** ✅
+  （首跑 2 changed → 已格式化后复检通过）；dart analyze 因 2 核 OOM 崩溃（已知环境问题）。
+- commit `c4b97748`；push 成功；dispatch 被 422 拒（Actions 禁用）。
+- 下一步：老板恢复 Actions 后重跑 dispatch 出 D22 包（0.2.28.036）；实机刷帖一轮，
+  看 D22 建议行——判「值得做」就在诊断页把上限切到 3 再刷一轮对比发热；
+  判「无收益」则转查渲染/图片解码/DoH 出口。
+
+## 2026-10-15 13:00 CST — D24：A/B 开关跨重启持久化（阻断未解，第 5 轮）
+- 前置核对：#78 `a4f8ac9c` success（Release ios14-test-78 / 0.2.28.032），
+  #77/#76 success，无遗留 failure；**Actions 仍禁用**（本轮 dispatch 实测再返
+  HTTP 422；`POST /actions/runs/78/rerun` 返 404，进一步印证账号级禁用）。
+  D19–D24 六个 commit 均无对应 run。
+- 本轮判断：D19/D22 把「图片分流」「桥并发上限」做成运行时 A/B，但**只存内存**。
+  实机对比发热必须重启 App（TrollStore 覆盖装/崩溃/手动杀）时，档位会静默回落到
+  默认值，A/B 数据作废——这是当前唯一还能在 CI 被禁期间推进的实机可用性缺口。
+- 改动（纯设置持久化，零运行时开销、零采样，不碰 WebView 挂起/暂停 API）：
+  - `webview_adapter_settings_service.dart`：新增 `_imageNativeRoutingKey` /
+    `_gateMaxConcurrentKey`；两个 setter 改为 `unawaited(_prefs?.setBool/setInt(...))`
+    落盘；`initialize()` 恢复两档并同步 `WebViewBridgeGate.instance.maxConcurrent`；
+    `resetForTest()` 复位到 true / `defaultMaxConcurrent`；补 `import 'dart:async'`。
+  - `ios14-test.yml`：APP_VERSION_SUFFIX 036→**037**。
+- 本地：dart format（CI 同款 3.12.0）1 文件 **0 changed exit 0** ✅；
+  dart analyze 单文件仍崩（2 核 OOM / analysis server crashed，历史环境问题）。
+- commit `81316167`；push 成功（origin 已同步）；dispatch 422。
+- 下一步：老板恢复 Actions 后重跑 dispatch 出 D24 包（0.2.28.037）；实机设档→重启
+  →确认档位保持→刷帖对比发热。SS 接管内置浏览器方向下轮交替推进。
+
+## 2026-10-15 14:00 CST — D25：跨桥字节搬运税归因（阻断未解，第 6 轮）
+- 前置核对：#78 `a4f8ac9c` success（Release ios14-test-78 / 0.2.28.032 已出），
+  #77/#76 success，无遗留 failure；**Actions 仍禁用**（本轮 dispatch 实测再返
+  HTTP 422）。D19–D25 七个 commit 均无对应 run。
+- 本轮判断：D16~D22 的归因全部建立在 `totalRequests` 这个**混合口径**上，但桥上
+  有两条成本结构差一个数量级的路径——文本响应（`callHandler` 一次性回传，≈1 次
+  跨语言往返）与二进制流（`createWebMessageChannel` 建通道 + `postWebMessage`
+  握手 + 每 chunk 一次 `setWebMessageCallback` 回调，≈2+N 次）。若活跃期走桥的
+  以流为主，「每请求固定税」的真实大头是**通道建立 + 分块回调**，此时砍脚本体积
+  毫无收益，该砍的是走桥的流请求条数（即继续 D2 方向的静态资源分流）。缺一个把
+  这个拆出来的判据。
+- 改动（纯派生只读计数，零采样、零新增运行时开销，不碰任何 WebView 挂起/暂停 API，
+  不阻塞 JS 执行）：
+  - `webview_bridge_diagnostics.dart`：新增 `binaryBridgeResponses` /
+    `binaryBridgeBytes` / `binaryBridgeChunks` 三个聚合计数；新增
+    `bridgeByteTaxVerdict` getter（三种可执行结论：流路径主导 / 文本路径主导 /
+    无流走桥）；阈值常量 `bridgeByteTaxStreamDominantRatio`=30；`reset()` 一并复位。
+  - `webview_http_adapter.dart`：`bridge.done.whenComplete` 里累加三个计数。
+  - `ios14_network_diagnostics_page.dart`：加 D25 结论行 + 流路径固定成本明细行 +
+    报告 map 三个字段。
+  - `ios14-test.yml`：APP_VERSION_SUFFIX 037→**038**。
+- 本地：dart format（CI 同款 3.12.0）3 文件 **0 changed exit 0** ✅。
+- commit `ce762103`；push 成功；dispatch 被 422 拒（Actions 禁用）。
+- 下一步：老板恢复 Actions 后重跑 dispatch 出 D25 包（0.2.28.038）；实机刷帖一轮
+  看 D25 结论行——判「流路径主导」则继续把静态资源分流原生栈；判「文本路径主导」
+  则优先减少走桥请求条数。SS 接管内置浏览器方向下轮交替推进。
+
+## 2026-10-15 16:00 CST — D27：图片分流豁免名单（阻断未解，第 7 轮）
+- 前置核对：#78 `a4f8ac9c` success（Release ios14-test-78 / 0.2.28.032 已出）；
+  #77/#76 success，无遗留 failure；**Actions 仍禁用**（本轮 dispatch 实测再返
+  HTTP 422 「Actions has been disabled for this repository」）。D19–D27 共 9 个
+  commit 均无对应 run、出不了包。
+- 本轮判断：D2 把同源图片**整体**分流原生栈，但回退手段只有「整体开关」
+  （`imageNativeRoutingEnabled` 置 false）——一旦某条图片路径实测被 CF 拦/变糊，
+  关掉开关就把已省下的全部桥负载吐回去，实验只能二选一。缺「逐条豁免」的粒度。
+- 改动（零运行时开销、零采样，不碰任何 WebView 挂起/暂停 API，不阻塞 JS）：
+  - `webview_adapter_settings_service.dart`：新增 `_imageSkipPathsKey` 持久化键 +
+    `imageSkipPathsNotifier` + `isImageRoutingSkipped(uri)`（path 小写子串匹配）
+    + `addImageSkipPath` / `removeImageSkipPath` / `clearImageSkipPaths`（均落盘）；
+    `initialize()` 恢复名单；`resetForTest()` 复位为空。
+  - `platform_adapter.dart`：图片分流分支加豁免判断——命中名单则**仍走桥**并
+    累加 `imageRoutingSkipped`，否则照旧分流并累加 `imageRoutedNative`。
+  - `webview_bridge_diagnostics.dart`：新增 `imageRoutingSkipped` 计数并纳入 `reset()`。
+  - `ios14_network_diagnostics_page.dart`：报告加 `imageRoutingSkipped` /
+    `imageSkipPaths` 两字段；页面加「豁免次数」行 + 名单行 + 「加一条跳过片段」
+    弹窗 / 清空 / 逐条删除（InputChip）；监听 `imageSkipPathsNotifier`。
+  - `ios14-test.yml`：APP_VERSION_SUFFIX 038→**039**→（本轮最终）**040**。
+- 本地：dart format（CI 同款 3.12.0）5 文件 **0 changed exit 0** ✅
+  （首轮 3 changed，已用同款 dart format 就地修正后复检 0 changed）。
+- commit `a74d4eef`；push 成功（origin 已同步）；dispatch 被 422 拒（Actions 禁用）。
+- 下一步：老板恢复 Actions 后重跑 dispatch 出 D27 包（0.2.28.040）；实机刷帖若见
+  某路径图片 403/变糊，在诊断页把该路径片段加入豁免名单即时验证，不必整体关分流。
+  SS 接管内置浏览器方向下轮交替推进。
