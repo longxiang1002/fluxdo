@@ -85,6 +85,13 @@ class WebViewHttpAdapter implements HttpClientAdapter {
   int _activeFetches = 0;
   bool _disposeWhenIdle = false;
 
+  /// D34: 本请求在闸门外排队的毫秒数（0 = 未排队）。
+  ///
+  /// 由闸门放行瞬间的 [WebViewBridgeGate.onQueueWait] 回调写入，供请求
+  /// **完全结束**时算「端到端桥代价 = 进桥耗时 + 排队耗时」。
+  /// 每个请求在 acquire 前先置 0，避免沿用上一条请求的值。
+  int _lastQueueWaitMs = 0;
+
   /// 初始化 WebView
   Future<void> initialize() async {
     if (_isInitialized && _controller != null) return;
@@ -312,9 +319,15 @@ document.close();
     // D31: 排队等待按类别归因——把「这次在闸门外等了多久」记到本请求的类别上。
     // 回调在闸门放行时同步触发（就在 acquire 的 Future 完成之前），
     // 因此这里捕获的 requestClass 一定是本请求自己的类别。
+    // D34: 同时把等待毫秒数暂存到实例字段，供请求结束时算端到端桥代价。
+    _lastQueueWaitMs = 0;
     final gate = WebViewBridgeGate.instance;
-    gate.onQueueWait = (int waitedMs) =>
-        _recordClassQueueWait(requestClass, waitedMs);
+    gate.onQueueWait = (int waitedMs) {
+      // D34: 记下本次排队耗时，供请求完全结束时算「端到端桥代价」。
+      // 只存一个整数，不新增对象、不新增回调。
+      _lastQueueWaitMs = waitedMs;
+      _recordClassQueueWait(requestClass, waitedMs);
+    };
     await gate.acquire(weight: gateWeight);
     // D31: 归因回调只服务于「本请求排队」这一件事，用完立刻摘掉，
     // 避免它在下一次别的请求排队时被误触发。
@@ -681,6 +694,13 @@ document.close();
       // D13: 释放桥名额（必须在 onRequestEnd 之后，保证在飞时长含排队时间）。
       // D28: 权重必须与 acquire 时一致，否则槽位计数漂移。
       WebViewBridgeGate.instance.release(weight: gateWeight);
+      // D34: 端到端桥代价按类别落账——把「本次排队耗时 + 进桥耗时」相加记一次。
+      // 排队耗时由闸门在放行瞬间回调给出（见上面 gate.onQueueWait 的捕获），
+      // 未排队时为 0，因此本条计数对未排队请求等价于进桥耗时。
+      _recordClassEndToEnd(
+        requestClass,
+        totalWatch.elapsedMilliseconds + _lastQueueWaitMs,
+      );
       // D33: 释放后立刻再采一次——名额刚腾出，闸门状态可能从饱和转为非饱和，
       // 这次采样正是「饱和持续了多久」的收尾点。
       _sampleGateSaturation(WebViewBridgeGate.instance, gateWeight);
@@ -822,6 +842,36 @@ document.close();
         stats.apiWriteQueueMs += ms;
       case _BridgeRequestClass.other:
         stats.otherQueueMs += ms;
+    }
+  }
+
+  /// D34: 把「本条请求的端到端桥代价」按类别落一次账。
+  ///
+  /// 动机（2026-10-13 深夜重定位：活跃刷帖时发热）：D26 记进桥耗时、D31 记
+  /// 门外排队耗时，但两者**分开存放**，无法回答「图片这条请求从头到尾一共
+  /// 让桥忙了多久」。一条图片可能进桥只花 50ms、门外却等了 400ms——只看
+  /// 进桥耗时会把图片误判为「已经不是瓶颈」，从而把优化方向切错。
+  ///
+  /// 本方法在请求**完全结束**时调用一次（文本路径与二进制流路径各一处），
+  /// 把「进桥耗时 + 本次排队耗时」相加后按类别累加。排队耗时由闸门的
+  /// [WebViewBridgeGate.onQueueWait] 回调在放行瞬间给出（只有真排过队才有值，
+  /// 未排队即为 0），因此本方法对未排队请求等价于「进桥耗时」。
+  ///
+  /// 纯整数累加，零采样、零新增运行时开销；不记录 URL / Headers / 正文。
+  void _recordClassEndToEnd(_BridgeRequestClass cls, int ms) {
+    if (ms <= 0) return;
+    final stats = WebViewBridgeDiagnostics.instance;
+    switch (cls) {
+      case _BridgeRequestClass.imageSameOrigin:
+        stats.imageSameOriginTotalMs += ms;
+      case _BridgeRequestClass.imageOther:
+        stats.imageOtherTotalMs += ms;
+      case _BridgeRequestClass.apiGet:
+        stats.apiGetTotalMs += ms;
+      case _BridgeRequestClass.apiWrite:
+        stats.apiWriteTotalMs += ms;
+      case _BridgeRequestClass.other:
+        stats.otherTotalMs += ms;
     }
   }
 

@@ -267,6 +267,14 @@ class _Ios14NetworkDiagnosticsPageState
       'gateUnsaturatedMs': _gate.unsaturatedMs,
       'gateObservedMs': _gate.observedMs,
       'gateSaturationPct': _gate.saturationPct,
+      'endToEndAttributionVerdict': s.endToEndAttributionVerdict,
+      'totalEndToEndMs': s.totalEndToEndMs,
+      'imageSameOriginTotalMs': s.imageSameOriginTotalMs,
+      'imageOtherTotalMs': s.imageOtherTotalMs,
+      'apiGetTotalMs': s.apiGetTotalMs,
+      'apiWriteTotalMs': s.apiWriteTotalMs,
+      'otherTotalMs': s.otherTotalMs,
+      'queueShareOfEndToEndPct': s.queueShareOfEndToEndPct,
       'totalClassifiedCookieMs': s.totalClassifiedCookieMs,
       'totalClassifiedJsMs': s.totalClassifiedJsMs,
       'totalClassifiedBrowserMs': s.totalClassifiedBrowserMs,
@@ -654,6 +662,18 @@ class _Ios14NetworkDiagnosticsPageState
             '饱和计时（D33）：饱和 ${_gate.saturatedMs}ms'
             ' / 非饱和 ${_gate.unsaturatedMs}ms'
             '（在请求进出桥时各采一次，无定时器）',
+          ),
+          Text(
+            '端到端桥代价归因（D34）：${_bridge.endToEndAttributionVerdict}',
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+          Text(
+            '端到端桥代价（D34）：合计 ${_bridge.totalEndToEndMs}ms'
+            '（图片 ${_bridge.imageSameOriginTotalMs + _bridge.imageOtherTotalMs}ms'
+            ' / API ${_bridge.apiGetTotalMs + _bridge.apiWriteTotalMs}ms'
+            ' / 其它 ${_bridge.otherTotalMs}ms）；'
+            '其中排队占 ${_bridge.queueShareOfEndToEndPct ?? 0}%'
+            '（= 端到端里有多少时间卡在闸门外）',
           ),
           const Text(
             '判读：累计排队明显 > 0 且平均在飞时长下降 → 限流生效，'

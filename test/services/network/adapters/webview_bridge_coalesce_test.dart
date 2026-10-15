@@ -306,4 +306,63 @@ void main() {
       gate.reset();
     });
   });
+
+  group('D34 端到端桥代价按类别归因', () {
+    test('无完成请求时不冒充结论', () {
+      expect(stats.endToEndAttributionVerdict, isNull);
+      expect(stats.queueShareOfEndToEndPct, isNull);
+      expect(stats.totalEndToEndMs, 0);
+    });
+
+    test('合计 = 各类别之和，排队占比按端到端口径算', () {
+      stats.imageSameOriginTotalMs = 400;
+      stats.imageOtherTotalMs = 100;
+      stats.apiGetTotalMs = 300;
+      stats.apiWriteTotalMs = 100;
+      stats.otherTotalMs = 100;
+      expect(stats.totalEndToEndMs, 1000);
+      stats.apiGetQueueMs = 250;
+      expect(stats.queueShareOfEndToEndPct, 25);
+    });
+
+    test('图片占比 ≥50% → 指向继续分流原生', () {
+      stats.imageSameOriginTotalMs = 600;
+      stats.apiGetTotalMs = 400;
+      final verdict = stats.endToEndAttributionVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('代价压在图片上'));
+      expect(verdict, contains('分流原生'));
+    });
+
+    test('API 占比 ≥50% → 指向合并调用/降条数', () {
+      stats.imageSameOriginTotalMs = 200;
+      stats.apiGetTotalMs = 700;
+      stats.apiWriteTotalMs = 100;
+      final verdict = stats.endToEndAttributionVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('代价压在 API 上'));
+      expect(verdict, contains('合并调用'));
+    });
+
+    test('两类均不突出 → 提示查桥外因素', () {
+      stats.imageSameOriginTotalMs = 300;
+      stats.apiGetTotalMs = 300;
+      stats.otherTotalMs = 400;
+      final verdict = stats.endToEndAttributionVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('均不突出'));
+      expect(verdict, contains('桥外'));
+    });
+
+    test('reset 清零端到端计数，保持「端到端 ≈ 进桥 + 排队」可交叉验证', () {
+      stats.imageSameOriginTotalMs = 500;
+      stats.apiGetTotalMs = 500;
+      stats.imageSameOriginMs = 300;
+      stats.apiGetQueueMs = 200;
+      stats.reset();
+      expect(stats.totalEndToEndMs, 0);
+      expect(stats.queueShareOfEndToEndPct, isNull);
+      expect(stats.endToEndAttributionVerdict, isNull);
+    });
+  });
 }

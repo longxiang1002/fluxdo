@@ -745,6 +745,83 @@ class WebViewBridgeDiagnostics {
       apiWriteQueueMs +
       otherQueueMs;
 
+  /// D34: 各类别**端到端桥代价**（= 闸门外排队 + 进桥后耗时）累计（毫秒）。
+  ///
+  /// 动机（2026-10-13 深夜重定位：活跃刷帖时发热）：
+  /// D26 只记「进桥之后花了多久」，D31 只记「闸门外等了多久」，D33 只回答
+  /// 「闸门顶在上限的时间占比」——三者都只看到桥代价的**一半**。
+  /// 而「限流到底让某类请求更轻了没有」必须看**端到端**：
+  /// 一条图片请求可能「进桥只花 50ms」但「在门外等了 400ms」，
+  /// 只看进桥耗时就会误判「图片已经不是瓶颈」，从而错误地把优化方向
+  /// 从分流切到别处。
+  ///
+  /// 本组计数在请求**完全结束**时把两类数据相加落一次（见适配器侧
+  /// `_recordClassEndToEnd`），因此是「每完成一条请求记一笔」，
+  /// 与 [totalClassifiedMs] / [totalQueueMs] 的累加口径一致，
+  /// 三者可直接相减交叉验证（端到端 ≈ 进桥 + 排队）。
+  /// 纯整数累加，零采样、零新增运行时开销；不记录 URL / Headers / 正文。
+  int imageSameOriginTotalMs = 0;
+  int imageOtherTotalMs = 0;
+  int apiGetTotalMs = 0;
+  int apiWriteTotalMs = 0;
+  int otherTotalMs = 0;
+
+  /// D34: 各类别**端到端桥代价**之和（毫秒）。
+  int get totalEndToEndMs =>
+      imageSameOriginTotalMs +
+      imageOtherTotalMs +
+      apiGetTotalMs +
+      apiWriteTotalMs +
+      otherTotalMs;
+
+  /// D34: 端到端代价里「排队占比」（0~100 的整数百分比）；无样本返回 null。
+  ///
+  /// 这是「限流把代价前置了多少」的直接数字：占比高说明请求主要卡在门外，
+  /// 降低上限只会继续把它往后压；占比低说明桥内本身是瓶颈。
+  int? get queueShareOfEndToEndPct {
+    final total = totalEndToEndMs;
+    if (total <= 0) return null;
+    return (totalQueueMs * 100 / total).round();
+  }
+
+  /// D34: 各类别「端到端桥代价」速判——回答「活跃期桥代价由谁贡献」。
+  ///
+  /// 动机：D26/D31/D32/D33 分别回答了「进桥多久」「门外等多久」「三段怎么分」
+  /// 「闸门饱和多久」，但**没有把类别与端到端代价合起来**。活跃刷帖发热时，
+  /// 最需要的是一句可执行结论：桥代价主要压在图片上还是 API 上？
+  /// 压图片 → 继续分流原生（D2/D19）；压 API → 合并调用/降条数/减少轮询；
+  /// 两者都不突出 → 桥不是主因，转查桥外（渲染/图片解码/DoH 出口）。
+  ///
+  /// 判据只用已聚合整数，纯派生、零采样、零新增运行时开销。返回 `null`
+  /// 表示样本不足。
+  String? get endToEndAttributionVerdict {
+    final total = totalEndToEndMs;
+    if (total <= 0) return null;
+    final imageMs = imageSameOriginTotalMs + imageOtherTotalMs;
+    final imagePct = (imageMs * 100 / total).round();
+    final apiMs = apiGetTotalMs + apiWriteTotalMs;
+    final apiPct = (apiMs * 100 / total).round();
+    final queuePct = queueShareOfEndToEndPct ?? 0;
+    final head =
+        '端到端桥代价归因（D34）：合计 $total ms，'
+        '图片 $imageMs ms（$imagePct%）、API $apiMs ms（$apiPct%）、'
+        '其它 $otherTotalMs ms；其中闸门外排队占 $queuePct%。';
+
+    if (imagePct >= 50) {
+      return '$head **代价压在图片上**——图片是活跃刷帖的主要桥负载，'
+          '下一步继续把同源图片分流原生栈（D2/D19），'
+          '或用跳过名单（D27）先豁免大图路径。';
+    }
+    if (apiPct >= 50) {
+      return '$head **代价压在 API 上**——图片分流已见效，'
+          '瓶颈转为 API 请求条数/单请求固定税；'
+          '下一步合并调用、降轮询频率或减少走桥条数（D16/D17）。';
+    }
+    return '$head 图片与 API **均不突出**——桥代价分散，'
+        '说明活跃发热可能不在桥内；转查桥外因素'
+        '（列表渲染/图片解码/DoH 出口/CF 刷新重建）。';
+  }
+
   /// D32: 按请求类别拆出的三段桥内耗时——cookie 准备 / JS 调用 / 等浏览器。
   ///
   /// 动机（2026-10-13 深夜重定位：活跃刷帖时发热）：
@@ -1011,6 +1088,13 @@ class WebViewBridgeDiagnostics {
     apiGetQueueMs = 0;
     apiWriteQueueMs = 0;
     otherQueueMs = 0;
+    // D34: 端到端桥代价一并清零，保证「端到端 ≈ 进桥 + 排队」的交叉验证
+    // 在重置后仍然成立。
+    imageSameOriginTotalMs = 0;
+    imageOtherTotalMs = 0;
+    apiGetTotalMs = 0;
+    apiWriteTotalMs = 0;
+    otherTotalMs = 0;
     imageSameOriginCookieMs = 0;
     imageSameOriginJsMs = 0;
     imageSameOriginBrowserMs = 0;
