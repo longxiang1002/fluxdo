@@ -745,6 +745,118 @@ class WebViewBridgeDiagnostics {
       apiWriteQueueMs +
       otherQueueMs;
 
+  /// D32: 按请求类别拆出的三段桥内耗时——cookie 准备 / JS 调用 / 等浏览器。
+  ///
+  /// 动机（2026-10-13 深夜重定位：活跃刷帖时发热）：
+  /// D31 把「闸门外排队」按类别归因了，但**进桥之后**的耗时仍只有一个总数
+  /// （[imageSameOriginMs] 等）。而 D17 已把单请求耗时拆成「cookie准备 /
+  /// JS调用 / 等浏览器」三段，只是**没按类别分开**——于是无法回答：
+  /// 图片类走桥请求的 CPU 时间到底花在「拼 JS 脚本 + evaluateJavascript」
+  /// 还是「等 WebKit 网络返回」？前者是纯 CPU（可优化：脚本瘦身/复用），
+  /// 后者是 I/O 等待（优化手段完全不同：降并发或换原生栈）。
+  ///
+  /// 三段口径与 [cookiePrepMs] / [jsEvalMs] / [browserWaitMs] 完全一致，
+  /// 只是按类别各存一份。纯整数累加，零采样、零新增运行时开销。
+  int imageSameOriginCookieMs = 0;
+  int imageSameOriginJsMs = 0;
+  int imageSameOriginBrowserMs = 0;
+  int imageOtherCookieMs = 0;
+  int imageOtherJsMs = 0;
+  int imageOtherBrowserMs = 0;
+  int apiGetCookieMs = 0;
+  int apiGetJsMs = 0;
+  int apiGetBrowserMs = 0;
+  int apiWriteCookieMs = 0;
+  int apiWriteJsMs = 0;
+  int apiWriteBrowserMs = 0;
+  int otherCookieMs = 0;
+  int otherJsMs = 0;
+  int otherBrowserMs = 0;
+
+  /// D32: 全部类别的「cookie 准备」耗时之和（毫秒）。
+  int get totalClassifiedCookieMs =>
+      imageSameOriginCookieMs +
+      imageOtherCookieMs +
+      apiGetCookieMs +
+      apiWriteCookieMs +
+      otherCookieMs;
+
+  /// D32: 全部类别的「JS 调用」耗时之和（毫秒）——即纯 CPU 侧固定税。
+  int get totalClassifiedJsMs =>
+      imageSameOriginJsMs +
+      imageOtherJsMs +
+      apiGetJsMs +
+      apiWriteJsMs +
+      otherJsMs;
+
+  /// D32: 全部类别的「等浏览器」耗时之和（毫秒）——即 I/O 等待。
+  int get totalClassifiedBrowserMs =>
+      imageSameOriginBrowserMs +
+      imageOtherBrowserMs +
+      apiGetBrowserMs +
+      apiWriteBrowserMs +
+      otherBrowserMs;
+
+  /// D32: 「活跃发热的 CPU 时间到底花在哪一段」——把桥内耗时按
+  /// 「cookie准备 / JS调用 / 等浏览器」三段拆开，给出可执行靶点。
+  ///
+  /// 动机（2026-10-13 深夜重定位）：D26 回答「哪一类请求吃掉了桥时间」，
+  /// D31 回答「排队代价压在谁身上」，但都还没回答**这一段时间是 CPU 还是等待**。
+  /// 这决定优化方向：
+  ///   - **JS 调用段主导** → 是纯 CPU（拼脚本 + evaluateJavascript + 回传解码），
+  ///     下一步走脚本瘦身（D18 方向）、减少跨桥条数、复用 Stream bridge；
+  ///   - **等浏览器段主导** → 是 WebKit 网络/渲染 I/O 等待，桥本身不是 CPU 源，
+  ///     下一步应降并发或把该类请求分流原生栈，而不是继续抠脚本；
+  ///   - **cookie 准备段主导** → 是 WKHTTPCookieStore 往返，下一步继续砍
+  ///     边界同步频率（D9 方向）。
+  ///
+  /// 判据只用已聚合整数，纯派生、零采样、零新增运行时开销。返回 `null`
+  /// 表示样本不足（尚无走桥请求或三段全为 0）。
+  String? get classPhaseVerdict {
+    if (totalRequests < bridgeCostMinSamples) return null;
+    final cookie = totalClassifiedCookieMs;
+    final js = totalClassifiedJsMs;
+    final browser = totalClassifiedBrowserMs;
+    final total = cookie + js + browser;
+    if (total <= 0) return null;
+
+    int pct(int ms) => (ms * 100 / total).round();
+    final cookiePct = pct(cookie);
+    final jsPct = pct(js);
+    final browserPct = pct(browser);
+    final head =
+        '桥内分段归因（D32）：cookie准备 $cookie ms（$cookiePct%）、'
+        'JS调用 $js ms（$jsPct%）、等浏览器 $browser ms（$browserPct%）。';
+
+    if (jsPct >= 50) {
+      return '$head **JS 调用段主导**——这是纯 CPU 固定税'
+          '（拼脚本 + evaluateJavascript + 回传解码），'
+          '下一步走脚本瘦身（D18 方向）、减少跨桥条数、'
+          '复用 Stream bridge 避免 base64 fallback。';
+    }
+    if (browserPct >= 50) {
+      return '$head **等浏览器段主导**——桥本身不是 CPU 源，'
+          '时间花在 WebKit 网络/渲染 I/O 上，'
+          '下一步应降该类并发或把该类请求分流原生栈（D2 方向），'
+          '继续抠脚本收益有限。';
+    }
+    if (cookiePct >= 50) {
+      return '$head **cookie 准备段主导**——时间花在 WKHTTPCookieStore 往返上，'
+          '下一步继续砍边界同步频率（D9 方向）或按需同步。';
+    }
+    return '$head 三段分散，没有单一段主导，'
+        '桥内耗时结构均衡，可按占比从高到低依次优化。';
+  }
+
+  /// D32: 图片类「JS 调用段」耗时（纯 CPU 侧），供诊断页细看。
+  ///
+  /// 便于回答「图片类的 CPU 税 vs API 类的 CPU 税各占多少」，
+  /// 与 [classPhaseVerdict] 的整体判据互补。
+  int get imageJsMs => imageSameOriginJsMs + imageOtherJsMs;
+
+  /// D32: 图片类「等浏览器」耗时（I/O），与 [imageJsMs] 配对。
+  int get imageBrowserMs => imageSameOriginBrowserMs + imageOtherBrowserMs;
+
   /// D31: 「限流代价压在谁身上」——按类别归因闸门外排队耗时，给出可执行靶点。
   ///
   /// 动机（2026-10-13 深夜重定位）：D13/D28 的闸门与权重是**纯 Dart 侧排队**，
@@ -863,6 +975,21 @@ class WebViewBridgeDiagnostics {
     apiGetQueueMs = 0;
     apiWriteQueueMs = 0;
     otherQueueMs = 0;
+    imageSameOriginCookieMs = 0;
+    imageSameOriginJsMs = 0;
+    imageSameOriginBrowserMs = 0;
+    imageOtherCookieMs = 0;
+    imageOtherJsMs = 0;
+    imageOtherBrowserMs = 0;
+    apiGetCookieMs = 0;
+    apiGetJsMs = 0;
+    apiGetBrowserMs = 0;
+    apiWriteCookieMs = 0;
+    apiWriteJsMs = 0;
+    apiWriteBrowserMs = 0;
+    otherCookieMs = 0;
+    otherJsMs = 0;
+    otherBrowserMs = 0;
     textResponses = 0;
     textResponseBytes = 0;
     streamResponses = 0;

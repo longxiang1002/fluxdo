@@ -261,6 +261,12 @@ class _Ios14NetworkDiagnosticsPageState
       'gateQueuedWeighted': _gate.queuedWeighted,
       'gateWaiting': _gate.waiting,
       'queueAttributionVerdict': s.queueAttributionVerdict,
+      'classPhaseVerdict': s.classPhaseVerdict,
+      'totalClassifiedCookieMs': s.totalClassifiedCookieMs,
+      'totalClassifiedJsMs': s.totalClassifiedJsMs,
+      'totalClassifiedBrowserMs': s.totalClassifiedBrowserMs,
+      'imageJsMs': s.imageJsMs,
+      'imageBrowserMs': s.imageBrowserMs,
       'queueTotalMs': s.totalQueueMs,
       'imageSameOriginQueueMs': s.imageSameOriginQueueMs,
       'imageOtherQueueMs': s.imageOtherQueueMs,
@@ -423,6 +429,22 @@ class _Ios14NetworkDiagnosticsPageState
             ' / API 读 ${_bridge.apiGetMs}ms'
             ' / 写 ${_bridge.apiWriteMs}ms'
             ' / 其他 ${_bridge.otherMs}ms',
+          ),
+          if (_bridge.classPhaseVerdict != null)
+            Text(
+              '桥内分段归因（D32）：${_bridge.classPhaseVerdict}',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          Text(
+            '桥内三段耗时（D32）：cookie准备 '
+            '${_bridge.totalClassifiedCookieMs}ms'
+            ' / JS调用 ${_bridge.totalClassifiedJsMs}ms'
+            ' / 等浏览器 ${_bridge.totalClassifiedBrowserMs}ms',
+          ),
+          Text(
+            '图片类分段（D32）：JS调用 ${_bridge.imageJsMs}ms'
+            ' / 等浏览器 ${_bridge.imageBrowserMs}ms'
+            '（前者=纯 CPU 固定税，后者=I/O 等待，优化手段不同）',
           ),
           Text(
             '走桥请求总数：${_bridge.totalRequests}'

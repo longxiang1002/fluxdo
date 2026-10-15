@@ -187,4 +187,78 @@ void main() {
       expect(stats.cookieBackSyncMs, 0);
     });
   });
+
+  group('D32 桥内分段按类别归因', () {
+    test('样本不足时不冒充结论', () {
+      stats.apiGet = 3;
+      stats.apiGetJsMs = 900;
+      expect(stats.classPhaseVerdict, isNull);
+    });
+
+    test('JS 调用段主导 → 指向脚本瘦身（纯 CPU）', () {
+      stats.apiGet = 10;
+      stats.apiGetJsMs = 2000;
+      stats.apiGetBrowserMs = 300;
+      stats.apiGetCookieMs = 100;
+      final verdict = stats.classPhaseVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('JS 调用段主导'));
+      expect(verdict, contains('JS调用 2000 ms'));
+    });
+
+    test('等浏览器段主导 → 指出桥非 CPU 源，应降并发/分流', () {
+      stats.apiGet = 10;
+      stats.apiGetJsMs = 200;
+      stats.apiGetBrowserMs = 4000;
+      stats.apiGetCookieMs = 100;
+      final verdict = stats.classPhaseVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('等浏览器段主导'));
+    });
+
+    test('cookie 准备段主导 → 指向边界同步降频', () {
+      stats.apiGet = 10;
+      stats.apiGetJsMs = 200;
+      stats.apiGetBrowserMs = 300;
+      stats.apiGetCookieMs = 3000;
+      final verdict = stats.classPhaseVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('cookie 准备段主导'));
+    });
+
+    test('三段分散 → 不押单段', () {
+      stats.apiGet = 10;
+      stats.apiGetJsMs = 700;
+      stats.apiGetBrowserMs = 700;
+      stats.apiGetCookieMs = 700;
+      final verdict = stats.classPhaseVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('三段分散'));
+    });
+
+    test('图片类分段聚合：JS 与等浏览器分别求和', () {
+      stats.imageSameOriginJsMs = 100;
+      stats.imageOtherJsMs = 50;
+      stats.imageSameOriginBrowserMs = 400;
+      stats.imageOtherBrowserMs = 200;
+      expect(stats.imageJsMs, 150);
+      expect(stats.imageBrowserMs, 600);
+      expect(stats.totalClassifiedJsMs, 150);
+      expect(stats.totalClassifiedBrowserMs, 600);
+    });
+
+    test('reset 后分段计数清零', () {
+      stats.apiGet = 10;
+      stats.apiGetJsMs = 2000;
+      stats.imageSameOriginBrowserMs = 500;
+      expect(stats.classPhaseVerdict, isNotNull);
+      stats.reset();
+      expect(stats.classPhaseVerdict, isNull);
+      expect(stats.totalClassifiedJsMs, 0);
+      expect(stats.totalClassifiedBrowserMs, 0);
+      expect(stats.totalClassifiedCookieMs, 0);
+      expect(stats.imageJsMs, 0);
+      expect(stats.imageBrowserMs, 0);
+    });
+  });
 }

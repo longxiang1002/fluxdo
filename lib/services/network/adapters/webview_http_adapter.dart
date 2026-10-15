@@ -649,6 +649,13 @@ document.close();
       bridgeStats.totalMs += totalWatch.elapsedMilliseconds;
       // D26: 把本条文本响应的桥内耗时归到它的请求类别。
       _recordClassTime(requestClass, totalWatch.elapsedMilliseconds);
+      // D32: 进一步把桥内耗时按「cookie准备 / JS调用 / 等浏览器」三段归到类别。
+      _recordClassPhase(
+        requestClass,
+        cookiePrep: cookiePrepElapsed,
+        jsEval: jsEvalElapsed,
+        browserWait: browserWaitElapsed,
+      );
       bridgeStats.jsEvalMs += jsEvalElapsed.inMilliseconds;
       // D5: 本次响应体走的是「平级字段」新路径，省下了旧路径的整包二次转义。
       bridgeStats.textBodyUnescaped++;
@@ -735,6 +742,52 @@ document.close();
         stats.apiWriteMs += ms;
       case _BridgeRequestClass.other:
         stats.otherMs += ms;
+    }
+  }
+
+  /// D32: 把一条走桥请求的**桥内三段耗时**（cookie准备 / JS调用 / 等浏览器）
+  /// 累加到它的请求类别上。
+  ///
+  /// 与 [_recordClassTime] 的区别：后者只记「这条请求总共在桥里花了多久」，
+  /// 本方法进一步拆出「这段时间里多少是 CPU（JS 调用段）、多少是 I/O 等待
+  /// （等浏览器段）、多少是 cookie 库往返（cookie 准备段）」。
+  /// 动机（2026-10-13 深夜重定位：活跃刷帖时发热）：活跃发热是 CPU 问题，
+  /// 但「桥内总耗时」把 CPU 与 I/O 等待混在一起，无法判断该抠脚本还是该降并发。
+  ///
+  /// 三段口径与 [_recordTimings] 完全一致（同一批 Stopwatch），只是按类别各存一份。
+  /// 纯整数累加，零采样、零新增运行时开销；不记录 URL / Headers / 正文。
+  void _recordClassPhase(
+    _BridgeRequestClass cls, {
+    required Duration? cookiePrep,
+    required Duration? jsEval,
+    required Duration? browserWait,
+  }) {
+    final stats = WebViewBridgeDiagnostics.instance;
+    final cookieMs = cookiePrep?.inMilliseconds ?? 0;
+    final jsMs = jsEval?.inMilliseconds ?? 0;
+    final browserMs = browserWait?.inMilliseconds ?? 0;
+    if (cookieMs == 0 && jsMs == 0 && browserMs == 0) return;
+    switch (cls) {
+      case _BridgeRequestClass.imageSameOrigin:
+        stats.imageSameOriginCookieMs += cookieMs;
+        stats.imageSameOriginJsMs += jsMs;
+        stats.imageSameOriginBrowserMs += browserMs;
+      case _BridgeRequestClass.imageOther:
+        stats.imageOtherCookieMs += cookieMs;
+        stats.imageOtherJsMs += jsMs;
+        stats.imageOtherBrowserMs += browserMs;
+      case _BridgeRequestClass.apiGet:
+        stats.apiGetCookieMs += cookieMs;
+        stats.apiGetJsMs += jsMs;
+        stats.apiGetBrowserMs += browserMs;
+      case _BridgeRequestClass.apiWrite:
+        stats.apiWriteCookieMs += cookieMs;
+        stats.apiWriteJsMs += jsMs;
+        stats.apiWriteBrowserMs += browserMs;
+      case _BridgeRequestClass.other:
+        stats.otherCookieMs += cookieMs;
+        stats.otherJsMs += jsMs;
+        stats.otherBrowserMs += browserMs;
     }
   }
 
@@ -1012,6 +1065,14 @@ document.close();
     bridgeStats.totalMs += totalWatch.elapsedMilliseconds;
     // D26: 把本条流响应的桥内耗时归到它的请求类别。
     _recordClassTime(requestClass, totalWatch.elapsedMilliseconds);
+    // D32: 进一步把桥内耗时按「cookie准备 / JS调用 / 等浏览器」三段归到类别。
+    _recordClassPhase(
+      requestClass,
+      cookiePrep: cookiePrepElapsed,
+      jsEval: jsEvalElapsed,
+      // 流路径的「等浏览器」= 从发起 JS 到收到响应头，即 headerWatch。
+      browserWait: headerWatch.elapsed,
+    );
     bridgeStats.jsEvalMs += jsEvalElapsed.inMilliseconds;
 
     bridge.done.whenComplete(() {
