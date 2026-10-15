@@ -102,5 +102,50 @@ void main() {
       gate.release();
       expect(gate.inFlight, 0);
     });
+
+    test('D30: 活跃滚动图片×API 交错时，槽位计数不漂移、不饿死 API', () async {
+      // 模拟活跃刷帖的真实混合负载：上限 3，图片(权重2)与 API(权重1)
+      // 交错进入桥。目标是锁定 D28 的权重账本在交错场景下自洽——
+      // inFlight 永不越界、全部释放后回到 0、weightedAcquires 恰好等于
+      // 图片条数，且轻量 API 在容量放得下时不被队首大图永久饿死。
+      final gate = WebViewBridgeGate(maxConcurrent: 3);
+      // 第一张图 + 一个 API 立即进桥占满 3 槽；第二张图 + 两个 API 排队。
+      final fImage1 = gate.acquire(weight: 2); // inFlight 2，weighted=1
+      final fApi1 = gate.acquire(weight: 1); // inFlight 3
+      final fImage2 = gate.acquire(weight: 2); // 排队
+      final fApi2 = gate.acquire(weight: 1); // 排队
+      final fApi3 = gate.acquire(weight: 1); // 排队
+      var api3Done = false;
+      fApi3.whenComplete(() => api3Done = true);
+      expect(gate.inFlight, 3);
+      expect(gate.queuedTotal, 3);
+      expect(gate.weightedAcquires, 1);
+
+      // 释放 API(权重1)：槽位降到 2，队首 image2(权重2) 放不下 → 不唤醒，
+      // 轻量 API 也不被部分放行（保持 FIFO，锁死「不做部分放行」语义）。
+      gate.release(weight: 1);
+      expect(gate.inFlight, 2);
+      expect(gate.queuedTotal, 3);
+
+      // 释放 image1(权重2)：槽位归零，FIFO 唤醒 image2(权重2) → inFlight2，
+      // 再唤醒 api2(权重1) → inFlight3；api3 仍排队。
+      gate.release(weight: 2);
+      await fImage2;
+      await fApi2;
+      expect(gate.inFlight, 3);
+      expect(gate.weightedAcquires, 2);
+      expect(api3Done, isFalse, reason: 'api3 仍应排队');
+      expect(gate.queuedTotal, 3);
+
+      // 释放 image2(权重2)：唤醒 api3，最后全部释放账本归零。
+      gate.release(weight: 2);
+      await fApi3;
+      expect(gate.inFlight, 2);
+      gate.release(weight: 1); // api2
+      gate.release(weight: 1); // api3
+      expect(gate.inFlight, 0);
+      expect(gate.weightedAcquires, 2, reason: '2 张图都按权重进入过桥');
+      expect(gate.queuedTotal, 3, reason: '3 个请求真实排队过');
+    });
   });
 }
