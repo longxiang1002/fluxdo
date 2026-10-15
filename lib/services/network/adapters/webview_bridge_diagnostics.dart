@@ -59,6 +59,27 @@ class WebViewBridgeDiagnostics {
   /// 说明分流前的桥负载主要来自图片；分流后它应趋近 0。
   int imageResponseBytes = 0;
 
+  /// D38: 按**响应路径**（文本 vs 二进制流）拆分的桥内耗时与请求数。
+  ///
+  /// 动机（2026-10-13 深夜重定位）：D37 把耗时按请求数归一，回答了「单请求
+  /// 固定税贵不贵」；但桥里有两条**实现完全不同**的路径——文本响应走
+  /// `evaluateJavascript` 直接取字符串，二进制流走 WebMessageChannel 分块
+  /// 回传（D14/D25 已量化分块回调次数）。若两条路径的单请求成本差一个量级，
+  /// 那么「削单请求成本」的正确靶点是**贵的那条路径**，而不是笼统地削。
+  /// 这正是「活跃发热」最后一处未拆开的口径。
+  ///
+  /// 口径：与 [totalMs] 同源（单请求桥内总耗时），只是按响应路径二分；
+  /// 两者相加应等于 [totalMs]（同一请求只归入一条路径）。纯整数累加，
+  /// 零采样、零新增运行时开销，不触碰任何 WebView 挂起/暂停 API。
+  int textPathMs = 0;
+  int streamPathMs = 0;
+
+  /// D38: 走文本路径 / 流路径的请求数（与 [textResponses]/[streamResponses]
+  /// 不同——后者按响应体形态计，这里按**实际走桥时的路径选择**计，
+  /// 用于把 [textPathMs]/[streamPathMs] 归一成单请求成本）。
+  int textPathRequests = 0;
+  int streamPathRequests = 0;
+
   /// D25: 二进制流响应走「WebMessageChannel 分块回传」的请求数。
   ///
   /// 动机（2026-10-13 深夜重定位）：D16/D17/D20/D21/D22 全都在回答
@@ -1119,6 +1140,70 @@ class WebViewBridgeDiagnostics {
         '连接复用（路径B）、渲染与解码，或桥外排队/启停抖动。';
   }
 
+  /// D38: 文本路径的单请求平均成本（毫秒）。样本不足返回 `null`。
+  double? get textPathCostMs {
+    if (textPathRequests <= 0) return null;
+    return textPathMs / textPathRequests;
+  }
+
+  /// D38: 流路径的单请求平均成本（毫秒）。样本不足返回 `null`。
+  double? get streamPathCostMs {
+    if (streamPathRequests <= 0) return null;
+    return streamPathMs / streamPathRequests;
+  }
+
+  /// D38: 两条响应路径的单请求成本对比——回答「削单请求成本该削哪条路径」。
+  ///
+  /// 动机（2026-10-13 深夜重定位）：D37 说「单请求税很重/中等/很轻」，但桥内
+  /// 两条路径的实现代价天差地别：文本路径一次 `evaluateJavascript` 取回字符串，
+  /// 流路径要经 WebMessageChannel 分块回传（每块一次 JS↔native 边界穿越）。
+  /// 若流路径单请求成本显著高于文本路径，那「削单请求成本」就该优先削流路径
+  /// （D3 避免 base64 回退、D14 合并分块、限制同源大图走桥），而不是两条一起削。
+  ///
+  /// 判据只用已聚合整数（[textPathMs]/[streamPathMs] 与各自请求数），
+  /// 纯派生、零采样、零新增运行时开销。返回 `null` 表示两侧样本都不足。
+  String? get pathCostVerdict {
+    final textAvg = textPathCostMs;
+    final streamAvg = streamPathCostMs;
+    if (textAvg == null && streamAvg == null) return null;
+    final textMs = textAvg?.round();
+    final streamMs = streamAvg?.round();
+    final head =
+        '响应路径成本对比（D38）：文本路径 ${textPathRequests} 条'
+        '平均 ${textMs ?? "-"}ms（合计 $textPathMs ms）'
+        ' / 流路径 ${streamPathRequests} 条'
+        '平均 ${streamMs ?? "-"}ms（合计 $streamPathMs ms）。';
+    if (textAvg == null) {
+      return '$head 当前样本**全在流路径**——活跃发热的桥开销集中在'
+          '「分块回传」这条贵路径上；下一步优先削流路径（D3 避免 base64 回退、'
+          'D14 合并分块、把同源大图赶出桥 D2/D19）。';
+    }
+    if (streamAvg == null) {
+      return '$head 当前样本**全在文本路径**——桥开销集中在 JS 调用与'
+          '字符串回传；下一步优先削文本路径（D10 小体内联、减少 cookie 准备、'
+          '合并只读 API 调用）。';
+    }
+    // 两条路径都有样本：按倍率给结论。用「流路径 / 文本路径」的比值判定，
+    // 阈值取 2 倍——低于 2 倍视为量级相当，不必区分靶点。
+    if (streamAvg >= textAvg * 2) {
+      final ratio = (streamAvg / textAvg).toStringAsFixed(1);
+      return '$head **流路径明显更贵**（约 ${ratio}× 文本路径）——'
+          '活跃发热的桥开销主要压在「分块回传」上；下一步优先削流路径'
+          '（D3 避免 base64 回退、D14 合并分块、把同源大图赶出桥 D2/D19），'
+          '文本路径可暂缓。';
+    }
+    if (textAvg >= streamAvg * 2) {
+      final ratio = (textAvg / streamAvg).toStringAsFixed(1);
+      return '$head **文本路径明显更贵**（约 ${ratio}× 流路径）——'
+          '活跃发热的桥开销主要压在 JS 调用/字符串回传上；下一步优先削文本路径'
+          '（D10 小体内联、减少 cookie 准备与边界同步、合并只读 API 调用），'
+          '流路径可暂缓。';
+    }
+    return '$head **两条路径成本量级相当**——不存在单一主导路径，'
+        '下一步应整体降走桥条数（图片分流 D2、只读 API 改原生）或降并发上限，'
+        '而非只盯某一条路径。';
+  }
+
   void reset() {
     imageSameOrigin = 0;
     imageOther = 0;
@@ -1162,6 +1247,12 @@ class WebViewBridgeDiagnostics {
     streamResponses = 0;
     streamResponseBytes = 0;
     imageResponseBytes = 0;
+    // D38: 按响应路径拆分的耗时/条数一并清零，保证
+    // 「文本路径 + 流路径 = 桥内总耗时」的重置后不变式仍成立。
+    textPathMs = 0;
+    streamPathMs = 0;
+    textPathRequests = 0;
+    streamPathRequests = 0;
     binaryBridgeResponses = 0;
     binaryBridgeBytes = 0;
     binaryBridgeChunks = 0;

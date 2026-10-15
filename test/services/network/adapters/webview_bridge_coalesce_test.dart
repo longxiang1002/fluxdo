@@ -425,4 +425,88 @@ void main() {
       expect(stats.perRequestTaxVerdict, isNull);
     });
   });
+
+  group('D38 响应路径成本对比', () {
+    test('两条路径都无样本时，均值与判据均为 null', () {
+      expect(stats.textPathCostMs, isNull);
+      expect(stats.streamPathCostMs, isNull);
+      expect(stats.pathCostVerdict, isNull);
+    });
+
+    test('单请求成本 = 该路径总耗时 / 该路径条数', () {
+      stats.textPathRequests = 10;
+      stats.textPathMs = 200;
+      stats.streamPathRequests = 5;
+      stats.streamPathMs = 500;
+      expect(stats.textPathCostMs, 20);
+      expect(stats.streamPathCostMs, 100);
+    });
+
+    test('样本全在流路径 → 指出开销集中在分块回传，优先削流路径', () {
+      stats.streamPathRequests = 8;
+      stats.streamPathMs = 800;
+      final verdict = stats.pathCostVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('D38'));
+      expect(verdict, contains('全在流路径'));
+      expect(verdict, contains('D14'));
+    });
+
+    test('样本全在文本路径 → 指出开销集中在 JS 调用，优先削文本路径', () {
+      stats.textPathRequests = 8;
+      stats.textPathMs = 400;
+      final verdict = stats.pathCostVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('全在文本路径'));
+      expect(verdict, contains('D10'));
+    });
+
+    test('流路径 >= 2× 文本路径 → 判为流路径明显更贵', () {
+      stats.textPathRequests = 10;
+      stats.textPathMs = 100;
+      stats.streamPathRequests = 10;
+      stats.streamPathMs = 400;
+      final verdict = stats.pathCostVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('流路径明显更贵'));
+      expect(verdict, contains('4.0×'));
+    });
+
+    test('文本路径 >= 2× 流路径 → 判为文本路径明显更贵', () {
+      stats.textPathRequests = 10;
+      stats.textPathMs = 400;
+      stats.streamPathRequests = 10;
+      stats.streamPathMs = 100;
+      final verdict = stats.pathCostVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('文本路径明显更贵'));
+    });
+
+    test('两条路径量级相当 → 指出无单一主导路径，整体降条数', () {
+      stats.textPathRequests = 10;
+      stats.textPathMs = 200;
+      stats.streamPathRequests = 10;
+      stats.streamPathMs = 300;
+      final verdict = stats.pathCostVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('量级相当'));
+      expect(verdict, contains('降走桥条数'));
+    });
+
+    test('reset 清零路径拆分计数与判据', () {
+      stats.textPathRequests = 10;
+      stats.textPathMs = 400;
+      stats.streamPathRequests = 10;
+      stats.streamPathMs = 100;
+      expect(stats.pathCostVerdict, isNotNull);
+      stats.reset();
+      expect(stats.textPathMs, 0);
+      expect(stats.streamPathMs, 0);
+      expect(stats.textPathRequests, 0);
+      expect(stats.streamPathRequests, 0);
+      expect(stats.textPathCostMs, isNull);
+      expect(stats.streamPathCostMs, isNull);
+      expect(stats.pathCostVerdict, isNull);
+    });
+  });
 }

@@ -251,6 +251,13 @@ class _Ios14NetworkDiagnosticsPageState
       'classTimeVerdict': s.classTimeVerdict,
       'perRequestTaxVerdict': s.perRequestTaxVerdict,
       'averageBridgeCostMs': s.averageBridgeCostMs,
+      'pathCostVerdict': s.pathCostVerdict,
+      'textPathMs': s.textPathMs,
+      'streamPathMs': s.streamPathMs,
+      'textPathRequests': s.textPathRequests,
+      'streamPathRequests': s.streamPathRequests,
+      'textPathCostMs': s.textPathCostMs,
+      'streamPathCostMs': s.streamPathCostMs,
       'imageSameOriginMs': s.imageSameOriginMs,
       'imageOtherMs': s.imageOtherMs,
       'apiGetMs': s.apiGetMs,
@@ -448,6 +455,19 @@ class _Ios14NetworkDiagnosticsPageState
               '单请求固定税（D37）：${_bridge.perRequestTaxVerdict}',
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
+          if (_bridge.pathCostVerdict != null)
+            Text(
+              '响应路径成本对比（D38）：${_bridge.pathCostVerdict}',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          Text(
+            '路径拆分（D38）：文本路径 ${_bridge.textPathRequests} 条'
+            ' / ${_bridge.textPathMs}ms'
+            '（平均 ${_bridge.textPathCostMs?.round() ?? 0}ms）'
+            '；流路径 ${_bridge.streamPathRequests} 条'
+            ' / ${_bridge.streamPathMs}ms'
+            '（平均 ${_bridge.streamPathCostMs?.round() ?? 0}ms）',
+          ),
           Text(
             '各类别桥内耗时（D26）：图片同源 ${_bridge.imageSameOriginMs}ms'
             ' / 图片其他 ${_bridge.imageOtherMs}ms'

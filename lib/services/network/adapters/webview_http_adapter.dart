@@ -684,6 +684,10 @@ document.close();
       bridgeStats.textResponses++;
       bridgeStats.textResponseBytes += bodyContent.length;
       bridgeStats.totalMs += totalWatch.elapsedMilliseconds;
+      // D38: 按响应路径归因——本条走的是文本路径（evaluateJavascript 取回
+      // 字符串），与流路径（WebMessageChannel 分块回传）成本口径分开累计。
+      bridgeStats.textPathRequests++;
+      bridgeStats.textPathMs += totalWatch.elapsedMilliseconds;
       // D26: 把本条文本响应的桥内耗时归到它的请求类别。
       _recordClassTime(requestClass, totalWatch.elapsedMilliseconds);
       // D32: 进一步把桥内耗时按「cookie准备 / JS调用 / 等浏览器」三段归到类别。
@@ -1140,6 +1144,10 @@ document.close();
     final bridgeStats = WebViewBridgeDiagnostics.instance;
     bridgeStats.streamResponses++;
     bridgeStats.totalMs += totalWatch.elapsedMilliseconds;
+    // D38: 按响应路径归因——本条走的是流路径（WebMessageChannel 分块回传），
+    // 与文本路径（evaluateJavascript 取回字符串）成本口径分开累计。
+    bridgeStats.streamPathRequests++;
+    bridgeStats.streamPathMs += totalWatch.elapsedMilliseconds;
     // D26: 把本条流响应的桥内耗时归到它的请求类别。
     _recordClassTime(requestClass, totalWatch.elapsedMilliseconds);
     // D32: 进一步把桥内耗时按「cookie准备 / JS调用 / 等浏览器」三段归到类别。
