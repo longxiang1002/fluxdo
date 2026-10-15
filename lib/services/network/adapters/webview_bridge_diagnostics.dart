@@ -497,6 +497,54 @@ class WebViewBridgeDiagnostics {
   /// 说明并发上限已是瓶颈；低于此值说明闸门基本没拦住谁，限流无收益。
   static const int gateQueueDominantRatio = 20;
 
+  /// D21: 并发闸门「上限是否卡到活跃负载」的判据。
+  ///
+  /// 动机（2026-10-13 深夜重定位）：D20 的 [gateVsTaxVerdict] 用
+  /// 「排队占比」判断限流值不值得做，但排队占比为 0 有两种互斥含义：
+  ///   (a) 活跃期并发本就不高（桥不是瓶颈）；
+  ///   (b) 并发**长期顶在上限**，闸门把洪峰削平了，于是没人排队。
+  /// 两者优化方向相反：(a) 该转查渲染/解码/DoH；(b) 该继续下调上限
+  /// 或把更多请求分流原生。区别只看一个量：**活跃期平均并发**
+  /// （[WebViewBridgeProbe.averageActiveConcurrency]）。
+  ///
+  /// 判据：活跃期平均并发 ≥ 上限的 [gateSaturationRatio]（75%）即判「饱和」——
+  /// 说明闸门几乎一直贴着上限跑，活跃刷帖时桥是持续并发的共享资源，
+  /// 限流/分流仍有收益。
+  ///
+  /// 纯派生计算，只用已聚合整数与探针均值，零采样、零新增运行时开销。
+  /// 返回 `null` 表示样本不足（尚无活跃期采样）。
+  String? get gateSaturationVerdict {
+    final gate = WebViewBridgeGate.instance;
+    final probe = WebViewBridgeProbe.instance;
+    final avgConcurrency = probe.averageActiveConcurrency;
+    if (avgConcurrency == null) return null;
+    final avg = avgConcurrency.toStringAsFixed(2);
+    final cap = gate.maxConcurrent;
+    final ratio = cap == 0 ? 0.0 : avgConcurrency / cap;
+    final pct = (ratio * 100).round();
+
+    if (ratio >= gateSaturationRatio) {
+      return '闸门饱和度：活跃期平均并发 $avg / 上限 $cap（$pct%），'
+          '已贴近上限，说明活跃刷帖时桥是**持续并发**的共享资源，'
+          '闸门确实在削峰。下一步可继续下调上限（$cap→${cap - 1}→${cap - 2}）'
+          '或把更多只读请求分流原生栈，观察活跃期平均并发与发热是否同步下降。';
+    }
+    if (ratio >= gateSaturationRatio / 2) {
+      return '闸门饱和度：活跃期平均并发 $avg / 上限 $cap（$pct%），'
+          '中度占用。桥有负载但未打满，限流收益有限；'
+          '优先把更多只读/静态请求分流原生栈，而不是单纯下调上限。';
+    }
+    return '闸门饱和度：活跃期平均并发 $avg / 上限 $cap（$pct%），'
+        '远未打满，说明活跃期并发本就不高，桥不是活跃发热主因'
+        '（与 D20 排队占比为 0 相互印证）。应转查渲染/图片解码/DoH 出口。';
+  }
+
+  /// D21: 判定「闸门饱和」的平均并发 / 上限 比例阈值。
+  ///
+  /// 取 0.75：活跃期平均并发达到上限的 3/4，说明闸门几乎一直贴着上限跑；
+  /// 低于此值说明桥有余量，限流不是首要靶点。
+  static const double gateSaturationRatio = 0.75;
+
   void reset() {
     imageSameOrigin = 0;
     imageOther = 0;

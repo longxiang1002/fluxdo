@@ -198,6 +198,10 @@ class _Ios14NetworkDiagnosticsPageState
       'bridgeCostVerdict': s.bridgeCostVerdict,
       'bridgeTaxBreakdownVerdict': s.bridgeTaxBreakdownVerdict,
       'gateVsTaxVerdict': s.gateVsTaxVerdict,
+      'gateSaturationVerdict': s.gateSaturationVerdict,
+      'avgActiveConcurrency':
+          WebViewBridgeProbe.instance.averageActiveConcurrency,
+      'activeSampledMs': WebViewBridgeProbe.instance.activeSampledMs,
       'avgCookiePrepMs': s.totalRequests == 0
           ? 0
           : s.cookiePrepMs ~/ s.totalRequests,
@@ -322,6 +326,11 @@ class _Ios14NetworkDiagnosticsPageState
               '闸门排队 vs 固定税归因（D20）：${_bridge.gateVsTaxVerdict}',
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
+          if (_bridge.gateSaturationVerdict != null)
+            Text(
+              '闸门饱和度（D21）：${_bridge.gateSaturationVerdict}',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
           Text(
             '走桥请求总数：${_bridge.totalRequests}'
             '（图片同源 ${_bridge.imageSameOrigin} / 图片其他 ${_bridge.imageOther}'
@@ -436,6 +445,12 @@ class _Ios14NetworkDiagnosticsPageState
             '平均单次桥请求在飞时长：'
             '${_probe.averageInFlightMs == null ? "尚无完成请求" : "${_probe.averageInFlightMs!.toStringAsFixed(0)}ms"}'
             '（完成 ${_probe.completedRequests} 次，累计 ${_probe.inFlightMs}ms）',
+          ),
+          Text(
+            '活跃期平均并发（D21）：'
+            '${_probe.averageActiveConcurrency == null ? "尚未采样" : _probe.averageActiveConcurrency!.toStringAsFixed(2)}'
+            ' 个请求同时占用桥'
+            '（活跃采样 ${_probe.activeSampledMs}ms，积分 ${_probe.inFlightIntegralMs}ms·个）',
           ),
           const Text(
             '判读：并发峰值高且忙碌占比高 → 桥是活跃期主要 CPU 源，值得做并发限流；'

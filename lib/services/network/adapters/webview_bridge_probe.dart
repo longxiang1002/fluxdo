@@ -42,8 +42,24 @@ class WebViewBridgeProbe {
   /// 完成过的桥请求数（与 [inFlightMs] 配对算均值）。
   int completedRequests = 0;
 
+  /// D21: 活跃期「在飞请求数 × 时间」的积分（毫秒·个）。
+  ///
+  /// 动机（活跃刷帖发热，2026-10-13 老板实测仍热）：D12 的并发采样此前只在
+  /// **有请求在飞**时每秒 +1，因此 `busyRatio` 恒等于 100%，无法回答「刷帖时
+  /// 桥到底有多忙、并发有多高」。活跃发热恰恰是**持续并发**的症状，需要一个
+  /// 能反映「活跃期平均同时有多少请求占着桥」的指标。
+  ///
+  /// 本积分在采样器运行期间（即有请求在飞时）每秒累加当前在飞数，
+  /// 除以 [activeSampledMs] 即得**活跃期平均并发**。纯整数累加，
+  /// 只在活跃期发生，空闲零开销；不触碰任何 WebView 挂起/暂停 API。
+  int inFlightIntegralMs = 0;
+
+  /// D21: 采样器处于「活跃期」的累计时长（毫秒），与 [inFlightIntegralMs] 配对。
+  int activeSampledMs = 0;
+
   int _inFlight = 0;
   Timer? _sampler;
+  Stopwatch? _activeWatch;
 
   /// 采样周期：1s。仅在「有请求在飞」时启动，归零即停。
   static const Duration sampleInterval = Duration(seconds: 1);
@@ -89,11 +105,24 @@ class WebViewBridgeProbe {
     return inFlightMs / completedRequests;
   }
 
+  /// D21: 活跃期平均同时占用桥的请求数（并发度）；无活跃采样时返回 null。
+  ///
+  /// 这是活跃发热最直接的画像：值明显 > 1 说明活跃刷帖时桥是**持续并发**的，
+  /// 单条 JS 线程被多个请求轮转，CPU 花在跨语言调用与分块回传的反复切换上。
+  double? get averageActiveConcurrency {
+    if (activeSampledMs <= 0) return null;
+    return inFlightIntegralMs / activeSampledMs;
+  }
+
   void _ensureSampler() {
     if (_sampler != null) return;
+    // D21: 活跃期计时与积分只在采样器运行期间累加（即确实有请求在飞时）。
+    _activeWatch = Stopwatch()..start();
     _sampler = Timer.periodic(sampleInterval, (_) {
       if (_inFlight > 0) {
         concurrencySamples++;
+        // D21: 每秒把当前在飞数积进总分（时间 × 并发度）。
+        inFlightIntegralMs += _inFlight * sampleInterval.inMilliseconds;
       } else {
         idleSamples++;
       }
@@ -103,6 +132,13 @@ class WebViewBridgeProbe {
   void _stopSampler() {
     _sampler?.cancel();
     _sampler = null;
+    final watch = _activeWatch;
+    if (watch != null) {
+      watch.stop();
+      // D21: 结算本段活跃时长（可能不足一个采样周期，仍按实际毫秒计）。
+      activeSampledMs += watch.elapsedMilliseconds;
+      _activeWatch = null;
+    }
   }
 
   /// 诊断页重置时调用：清空计数并停表。
@@ -113,6 +149,8 @@ class WebViewBridgeProbe {
     idleSamples = 0;
     inFlightMs = 0;
     completedRequests = 0;
+    inFlightIntegralMs = 0;
+    activeSampledMs = 0;
     _inFlight = 0;
   }
 
