@@ -208,4 +208,86 @@ void main() {
       gate.onQueueWait = null;
     });
   });
+
+  group('D33 闸门饱和时间采样', () {
+    test('首次采样只建基线，不累加', () {
+      final gate = WebViewBridgeGate(maxConcurrent: 2);
+      gate.sampleSaturation(1000);
+      expect(gate.saturatedMs, 0);
+      expect(gate.unsaturatedMs, 0);
+      expect(gate.observedMs, 0);
+      expect(gate.saturationPct, isNull);
+      gate.resetAllForTest();
+    });
+
+    test('未饱和区间记到非饱和侧，饱和区间记到饱和侧', () async {
+      final gate = WebViewBridgeGate(maxConcurrent: 2);
+      // 基线：空闸门（非饱和）。
+      gate.sampleSaturation(0);
+      // 1000ms 后仍空 → 非饱和 1000ms。
+      gate.sampleSaturation(1000);
+      expect(gate.unsaturatedMs, 1000);
+      expect(gate.saturatedMs, 0);
+
+      // 占满 2 个槽位 → 之后进入饱和。
+      await gate.acquire(weight: 1);
+      await gate.acquire(weight: 1);
+      // 2000ms 时采样：距上次 1000ms，此刻在飞=2=上限 → 饱和。
+      gate.sampleSaturation(2000);
+      expect(gate.saturatedMs, 1000);
+      expect(gate.unsaturatedMs, 1000);
+      expect(gate.saturationPct, 50);
+
+      gate.release(weight: 1);
+      gate.release(weight: 1);
+      // 4000ms 时采样：距上次 2000ms，此刻在飞=0 → 非饱和。
+      gate.sampleSaturation(4000);
+      expect(gate.saturatedMs, 1000);
+      expect(gate.unsaturatedMs, 3000);
+      expect(gate.saturationPct, 25);
+      gate.resetAllForTest();
+    });
+
+    test('wouldBlock 只读判定，不改变放行行为', () async {
+      final gate = WebViewBridgeGate(maxConcurrent: 2);
+      expect(gate.wouldBlock(), isFalse);
+      expect(gate.wouldBlock(weight: 2), isFalse);
+      await gate.acquire(weight: 1);
+      expect(gate.wouldBlock(), isFalse, reason: '在飞 1，权重 1 仍放得下');
+      expect(gate.wouldBlock(weight: 2), isTrue, reason: '1+2>2，权重 2 放不下');
+      await gate.acquire(weight: 1);
+      expect(gate.wouldBlock(), isTrue, reason: '已满');
+      // wouldBlock 是纯读：在飞数不变。
+      expect(gate.inFlight, 2);
+      gate.release(weight: 1);
+      gate.release(weight: 1);
+      expect(gate.inFlight, 0);
+      gate.resetAllForTest();
+    });
+
+    test('时间未推进或倒流时不累加', () {
+      final gate = WebViewBridgeGate(maxConcurrent: 2);
+      gate.sampleSaturation(1000);
+      gate.sampleSaturation(1000);
+      expect(gate.observedMs, 0);
+      gate.sampleSaturation(500);
+      expect(gate.observedMs, 0);
+      gate.resetAllForTest();
+    });
+
+    test('reset 清空饱和计时并丢弃采样基线', () {
+      final gate = WebViewBridgeGate(maxConcurrent: 2);
+      gate.sampleSaturation(0);
+      gate.sampleSaturation(1000);
+      expect(gate.unsaturatedMs, 1000);
+      gate.reset();
+      expect(gate.saturatedMs, 0);
+      expect(gate.unsaturatedMs, 0);
+      expect(gate.saturationPct, isNull);
+      // 基线已丢弃：重置后第一次采样不补记「重置前→重置后」的时间。
+      gate.sampleSaturation(5000);
+      expect(gate.observedMs, 0);
+      gate.resetAllForTest();
+    });
+  });
 }

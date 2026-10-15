@@ -319,6 +319,11 @@ document.close();
     // D31: 归因回调只服务于「本请求排队」这一件事，用完立刻摘掉，
     // 避免它在下一次别的请求排队时被误触发。
     gate.onQueueWait = null;
+    // D33: 闸门饱和度采样——请求进出桥是闸门状态最可能变化的时刻，
+    // 顺手采一次即可把「闸门顶在上限的时间占比」累加起来。
+    // 纯整数累加，无定时器、无新增运行时开销；`wouldBlock` 只读当前
+    // 在飞数，不改变任何放行行为。
+    _sampleGateSaturation(gate, gateWeight);
     // D12: 活跃期并发/耗时探针（只计数，不改行为）。
     WebViewBridgeProbe.instance.onRequestStart();
 
@@ -676,6 +681,9 @@ document.close();
       // D13: 释放桥名额（必须在 onRequestEnd 之后，保证在飞时长含排队时间）。
       // D28: 权重必须与 acquire 时一致，否则槽位计数漂移。
       WebViewBridgeGate.instance.release(weight: gateWeight);
+      // D33: 释放后立刻再采一次——名额刚腾出，闸门状态可能从饱和转为非饱和，
+      // 这次采样正是「饱和持续了多久」的收尾点。
+      _sampleGateSaturation(WebViewBridgeGate.instance, gateWeight);
       if (_activeFetches == 0 && _disposeWhenIdle) {
         close(force: false);
       }
@@ -1107,6 +1115,19 @@ document.close();
       headers: headers.headers,
       statusMessage: headers.statusMessage,
     );
+  }
+
+  /// D33: 采样闸门饱和度——把「距上次采样这段时间」记到饱和/非饱和一侧。
+  ///
+  /// 动机（2026-10-13 深夜重定位：活跃刷帖时发热）：D21 的「平均并发」是
+  /// 采样均值，活跃期「一阵满、一阵空」的脉冲式负载会被均值抹平，看不出
+  /// 闸门其实长期顶在上限。本方法只在**请求进出桥**这两个天然时刻采样
+  /// （不新增定时器、不新增采样循环），即可算出饱和时间占比。
+  ///
+  /// 纯读 + 整数累加，不触碰任何 WebView 挂起/暂停 API；`wouldBlock` 只
+  /// 读当前在飞数，不改变放行行为，也不阻塞 JS。
+  void _sampleGateSaturation(WebViewBridgeGate gate, int weight) {
+    gate.sampleSaturation(DateTime.now().millisecondsSinceEpoch);
   }
 
   Future<_BinaryResponseBridge> _createBinaryResponseBridge(

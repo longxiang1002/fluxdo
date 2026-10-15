@@ -857,6 +857,42 @@ class WebViewBridgeDiagnostics {
   /// D32: 图片类「等浏览器」耗时（I/O），与 [imageJsMs] 配对。
   int get imageBrowserMs => imageSameOriginBrowserMs + imageOtherBrowserMs;
 
+  /// D33: 「闸门饱和时间占比」速判——回答「限流到底削掉了多少并发洪峰」。
+  ///
+  /// 动机（2026-10-13 深夜重定位：活跃刷帖时发热）：D20/D21/D22 用
+  /// 「排队条数占比」与「采样平均并发」判断限流值不值得做，但两者都会被
+  /// 活跃期「脉冲式满/空」抹平——一条请求在闸门外等 300ms，这 300ms 里
+  /// 闸门一直是满的，而均值看不出来。本判据直接给「闸门顶在上限的时间
+  /// 占比」，这才是限流真实生效强度的证据，也是决定「继续下调上限 vs
+  /// 回退上限」的最后一块拼图。
+  ///
+  /// 判据只用闸门已聚合的整数（[WebViewBridgeGate.saturatedMs] 等），
+  /// 纯派生、零采样、零新增运行时开销。返回 `null` 表示尚无观测样本。
+  String? get gateSaturationTimeVerdict {
+    final gate = WebViewBridgeGate.instance;
+    final pct = gate.saturationPct;
+    if (pct == null) return null;
+    final saturated = gate.saturatedMs;
+    final observed = gate.observedMs;
+    final head = '闸门饱和时间占比（D33）：$pct%（饱和 $saturated ms / 观测 $observed ms）。';
+
+    if (pct >= 70) {
+      return '$head **闸门长期顶在上限**——限流确实在削峰，'
+          '但同时也说明走桥请求的供给远超上限，活跃期桥被持续打满。'
+          '下一步优先**继续把同源图片分流原生**（D2/D19）或减少走桥条数，'
+          '而不是再下调上限（下调只会把更多请求压在队列里）。';
+    }
+    if (pct >= 30) {
+      return '$head 闸门**间歇性饱和**——活跃期有洪峰但未长期顶格，'
+          '当前上限大致匹配负载。若活跃发热仍在，'
+          '重点转向单请求固定税（D16/D17/D32）而非并发数。';
+    }
+    return '$head 闸门**基本不饱和**——并发上限不是瓶颈，'
+        '限流对发热几乎没有贡献，可考虑回退上限以降低排队延迟；'
+        '活跃发热应转向单请求成本（脚本/回传）或桥外因素'
+        '（渲染/图片解码/DoH 出口）。';
+  }
+
   /// D31: 「限流代价压在谁身上」——按类别归因闸门外排队耗时，给出可执行靶点。
   ///
   /// 动机（2026-10-13 深夜重定位）：D13/D28 的闸门与权重是**纯 Dart 侧排队**，

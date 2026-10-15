@@ -262,6 +262,11 @@ class _Ios14NetworkDiagnosticsPageState
       'gateWaiting': _gate.waiting,
       'queueAttributionVerdict': s.queueAttributionVerdict,
       'classPhaseVerdict': s.classPhaseVerdict,
+      'gateSaturationTimeVerdict': s.gateSaturationTimeVerdict,
+      'gateSaturatedMs': _gate.saturatedMs,
+      'gateUnsaturatedMs': _gate.unsaturatedMs,
+      'gateObservedMs': _gate.observedMs,
+      'gateSaturationPct': _gate.saturationPct,
       'totalClassifiedCookieMs': s.totalClassifiedCookieMs,
       'totalClassifiedJsMs': s.totalClassifiedJsMs,
       'totalClassifiedBrowserMs': s.totalClassifiedBrowserMs,
@@ -639,6 +644,16 @@ class _Ios14NetworkDiagnosticsPageState
           Text(
             '排队耗时归因（D31）：${_bridge.queueAttributionVerdict}',
             style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+          if (_bridge.gateSaturationTimeVerdict != null)
+            Text(
+              '闸门饱和时间占比（D33）：${_bridge.gateSaturationTimeVerdict}',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          Text(
+            '饱和计时（D33）：饱和 ${_gate.saturatedMs}ms'
+            ' / 非饱和 ${_gate.unsaturatedMs}ms'
+            '（在请求进出桥时各采一次，无定时器）',
           ),
           const Text(
             '判读：累计排队明显 > 0 且平均在飞时长下降 → 限流生效，'

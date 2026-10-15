@@ -107,6 +107,71 @@ class WebViewBridgeGate {
   /// 纯整数累加，零采样、零新增运行时开销。
   int queuedWeighted = 0;
 
+  /// D33: 当前是否已饱和（已占槽位 + 本次权重 > 上限）。
+  ///
+  /// 动机（2026-10-13 深夜重定位：活跃刷帖时发热）：D20/D21/D22 用
+  /// 「排队条数占比」判断限流值不值得做，但**排队条数 ≠ 限流生效时间**。
+  /// 一条请求在闸门外等 300ms，这 300ms 里闸门一直是满的；而 D21 的
+  /// 「平均并发」是按采样时刻求均值，活跃期「一阵满、一阵空」的脉冲式
+  /// 负载会被均值抹平，看不出闸门其实长期顶在上限。
+  ///
+  /// 本方法把「闸门是否饱和」做成一个**可逐次判定**的谓词（纯读、零副作用），
+  /// 由调用方在每次请求进出桥时采样，从而算出**饱和时间占比**——
+  /// 这才是「限流到底削掉了多少并发洪峰」的直接证据。
+  bool wouldBlock({int weight = 1}) {
+    final w = weight < 1 ? 1 : weight;
+    return _inFlight + w > _maxConcurrent;
+  }
+
+  /// D33: 累计「闸门处于饱和状态」的毫秒数。
+  ///
+  /// 由调用方在请求进出桥时成对调用 [markSaturated] / [markUnsaturated]
+  /// 来累积（见适配器侧 `_sampleGateSaturation`）。纯整数累加，
+  /// 零采样定时器、零新增运行时开销。
+  int saturatedMs = 0;
+
+  /// D33: 累计「闸门处于非饱和状态」的毫秒数。
+  ///
+  /// 与 [saturatedMs] 配对，二者之和即「被观测到的总时间」；
+  /// 饱和占比 = [saturatedMs] / (saturatedMs + unsaturatedMs)。
+  int unsaturatedMs = 0;
+
+  /// D33: 上一次采样时刻（毫秒，单调时钟）。null 表示尚无采样基线。
+  int? _lastSampleMs;
+
+  /// D33: 用当前时刻采样一次闸门饱和度，把「距上次采样这段时间」记到
+  /// 饱和或非饱和一侧。
+  ///
+  /// [nowMs] 由调用方传入（单调时钟毫秒），便于测试注入；不读系统时钟、
+  /// 不启动定时器。首次调用只建立基线，不累加（避免把「启动前的未知时间」
+  /// 记成非饱和）。纯整数运算，零副作用。
+  void sampleSaturation(int nowMs) {
+    final last = _lastSampleMs;
+    _lastSampleMs = nowMs;
+    if (last == null) return;
+    final delta = nowMs - last;
+    if (delta <= 0) return;
+    if (_inFlight >= _maxConcurrent) {
+      saturatedMs += delta;
+    } else {
+      unsaturatedMs += delta;
+    }
+  }
+
+  /// D33: 观测到的总时长（毫秒）。
+  int get observedMs => saturatedMs + unsaturatedMs;
+
+  /// D33: 闸门饱和时间占比（0~100 的整数百分比）；无样本时返回 null。
+  ///
+  /// 动机：D21 的「平均并发」是**采样均值**，会被活跃期「脉冲式满/空」
+  /// 抹平；本值直接给「闸门顶在上限的时间占了多少」，是限流是否真的
+  /// 在削峰的直接证据。纯派生、零采样、零新增运行时开销。
+  int? get saturationPct {
+    final total = observedMs;
+    if (total <= 0) return null;
+    return (saturatedMs * 100 / total).round();
+  }
+
   int _waiting = 0;
   final List<Completer<void>> _waiters = <Completer<void>>[];
 
@@ -216,6 +281,11 @@ class WebViewBridgeGate {
     queuedTotal = 0;
     queuedWeighted = 0;
     weightedAcquires = 0;
+    // D33: 饱和计时一并清零，并把采样基线置空——否则重置后第一次采样
+    // 会把「重置前到重置后」这段本不该计入的时间补记进去。
+    saturatedMs = 0;
+    unsaturatedMs = 0;
+    _lastSampleMs = null;
   }
 
   /// 仅用于测试：把内部状态置回初值。
@@ -227,6 +297,9 @@ class WebViewBridgeGate {
     queuedTotal = 0;
     queuedWeighted = 0;
     weightedAcquires = 0;
+    saturatedMs = 0;
+    unsaturatedMs = 0;
+    _lastSampleMs = null;
     for (final w in _waiters) {
       if (!w.isCompleted) {
         w.complete();

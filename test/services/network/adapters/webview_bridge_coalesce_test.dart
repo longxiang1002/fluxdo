@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fluxdo/services/network/adapters/webview_bridge_diagnostics.dart';
+import 'package:fluxdo/services/network/adapters/webview_bridge_gate.dart';
 
 void main() {
   late WebViewBridgeDiagnostics stats;
@@ -259,6 +260,50 @@ void main() {
       expect(stats.totalClassifiedCookieMs, 0);
       expect(stats.imageJsMs, 0);
       expect(stats.imageBrowserMs, 0);
+    });
+  });
+
+  group('D33 闸门饱和时间占比速判', () {
+    test('无观测样本时不冒充结论', () {
+      WebViewBridgeGate.instance.reset();
+      expect(stats.gateSaturationTimeVerdict, isNull);
+    });
+
+    test('饱和占比 ≥70% → 判为长期顶上限，指向分流而非再降上限', () {
+      final gate = WebViewBridgeGate.instance;
+      gate.reset();
+      gate.saturatedMs = 800;
+      gate.unsaturatedMs = 200;
+      final verdict = stats.gateSaturationTimeVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('80%'));
+      expect(verdict, contains('长期顶在上限'));
+      expect(verdict, contains('分流原生'));
+      gate.reset();
+    });
+
+    test('饱和占比 30~70% → 判为间歇性饱和，转向单请求固定税', () {
+      final gate = WebViewBridgeGate.instance;
+      gate.reset();
+      gate.saturatedMs = 500;
+      gate.unsaturatedMs = 500;
+      final verdict = stats.gateSaturationTimeVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('间歇性饱和'));
+      expect(verdict, contains('单请求固定税'));
+      gate.reset();
+    });
+
+    test('饱和占比 <30% → 判为基本不饱和，限流无贡献', () {
+      final gate = WebViewBridgeGate.instance;
+      gate.reset();
+      gate.saturatedMs = 100;
+      gate.unsaturatedMs = 900;
+      final verdict = stats.gateSaturationTimeVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('基本不饱和'));
+      expect(verdict, contains('回退上限'));
+      gate.reset();
     });
   });
 }
