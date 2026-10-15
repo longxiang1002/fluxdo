@@ -4,6 +4,52 @@
 > **2026-10-13 起主攻**：DoH 模式下 App 仍旧发热（症状=**活跃刷帖时**发热，非空闲）。
 
 
+## 🎯 本轮（2026-10-16 01:00 CST）— D33：闸门饱和时间占比（限流真实生效强度）
+
+### CI 前置核对（强制第 0 步）
+- **#78** `a4f8ac9c` = ✅ success（Release **ios14-test-78** / 0.2.28.032 已出）。
+- **#77** `affbc514` = ✅ success；**#76** `a47bc69c` = ✅ success。
+- → 无未修复 failure、无缺 Release。
+- ⚠️ **Actions 仍账号级冻结**：本轮实测 dispatch 再返 **HTTP 422**
+  `Actions has been disabled for this repository.`；runs total 恒停在 78。
+  D19~D33 均已 push 但无 run，只差 CI 出包验证。
+
+### 本轮改动（D33，commit `1a574e9d`）
+**动机（活跃负载发热主线）**：D20/D21/D22 用「排队条数占比」与「采样平均并发」
+判断限流值不值得做，但两者都会被活跃期「脉冲式满/空」抹平——一条请求在闸门外
+等 300ms，这 300ms 里闸门一直是满的，而**均值看不出来**。缺「闸门顶在上限的
+时间占比」这一直接证据，就无法判定当前并发上限是「削峰有效」还是「白限流」。
+
+**改动（纯 Dart 侧计时与派生判据，不碰 WebView 挂起/暂停 API，不阻塞 JS）**：
+- `webview_bridge_gate.dart`：新增 `wouldBlock({weight})`（纯读谓词）、
+  `saturatedMs`/`unsaturatedMs`/`observedMs`/`saturationPct`、
+  `sampleSaturation(nowMs)`（首次只建基线，时间未推进/倒流不累加）；
+  `reset`/`resetAllForTest` 同步清零并丢弃采样基线。
+- `webview_http_adapter.dart`：新增 `_sampleGateSaturation`，在**请求进出桥**
+  两个天然时刻各采一次（acquire 后、release 后），**不新增定时器/采样循环**。
+- `webview_bridge_diagnostics.dart`：新增 `gateSaturationTimeVerdict`
+  （≥70% 长期顶上限→继续分流而非再降上限；30~70% 间歇饱和→转单请求固定税；
+  <30% 基本不饱和→限流无贡献，可回退上限）。
+- `ios14_network_diagnostics_page.dart`：闸门区展示「闸门饱和时间占比（D33）」
+  与饱和计时；报告 map 加 5 个字段。
+- `webview_bridge_gate_test.dart`：新增 D33 五例；`webview_bridge_coalesce_test.dart`
+  新增 D33 四例（三档判据 + 无样本）。
+- `ios14-test.yml`：APP_VERSION_SUFFIX 045→**046**。
+
+### 本地验证（CI 同款 Dart 3.12.0）
+- `dart format --set-exit-if-changed`：6 文件 **0 changed exit 0** ✅
+- 本地 Flutter `flutter test` gate + coalesce → **45/45 通过** ✅（含 D33 九例）
+- `dart analyze` diagnostics 5 info 经 `git stash` 对照确认**改动前即存在**（非本轮引入）。
+
+### CI
+push `1a574e9d` 成功（`bfa4b2a1..1a574e9d`）；dispatch 422（Actions 冻结），无 run 无包。
+
+### 下一步
+1. 老板网页端恢复 GitHub Actions → 重跑 dispatch 出 D19~D33 各包（0.2.28.033~046）。
+2. 实机刷帖看诊断页「闸门饱和时间占比（D33）」：≥70% → 继续把同源图片分流原生；
+   <30% → 限流无贡献，转单请求成本（D16/D17/D32）或桥外因素。
+3. SS 接管内置浏览器方向（P1 iOS14 管道替代）与主线下轮交替推进。
+
 ## 🎯 本轮（2026-10-16 00:00 CST）— D32：桥内耗时三段按请求类别归因
 
 ### CI 前置核对（强制第 0 步）

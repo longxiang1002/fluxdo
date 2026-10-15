@@ -2369,3 +2369,34 @@ push `98f27565` + `483a18f1`（`APP_VERSION_SUFFIX` 017→**018**）→ **#60**�
   「桥内分段归因(D32)」——若 JS 调用段主导 → 继续脚本瘦身/减条数；
   若等浏览器段主导 → 桥非 CPU 源，转降并发或分流；与 D26/D31 交叉定位靶点。
   SS 接管内置浏览器方向下轮交替。
+
+## 2026-10-16 01:00 CST — D33 闸门饱和时间占比（CI 冻结第 14 轮）
+- 前置核对：#78 `a4f8ac9c` success（Release ios14-test-78 已出）；#77/#76 success；
+  无遗留 failure、无缺 Release。Actions 仍账号级冻结：本轮 dispatch 仍 422
+  （"Actions has been disabled for this repository."），runs total 恒 78。
+- 本轮改动（D33，纯 Dart 侧计时与派生判据，不碰 WebView 挂起/暂停 API，不阻塞 JS）：
+  - `webview_bridge_gate.dart`：新增 `wouldBlock({weight})` 纯读谓词、
+    `saturatedMs`/`unsaturatedMs`/`observedMs`/`saturationPct`、
+    `sampleSaturation(nowMs)`（首次只建基线；时间未推进/倒流不累加）；
+    `reset`/`resetAllForTest` 同步清零并丢弃采样基线。
+  - `webview_http_adapter.dart`：新增 `_sampleGateSaturation`，在请求**进出桥**
+    两个天然时刻各采一次（acquire 后、release 后），不新增定时器/采样循环。
+  - `webview_bridge_diagnostics.dart`：新增 `gateSaturationTimeVerdict`
+    （≥70% 长期顶上限→继续分流而非再降上限；30~70% 间歇饱和→转单请求固定税；
+    <30% 基本不饱和→限流无贡献，可回退上限）。
+  - `ios14_network_diagnostics_page.dart`：闸门区展示「闸门饱和时间占比（D33）」
+    与饱和计时；报告 map 加 5 字段。
+  - `webview_bridge_gate_test.dart`：新增 D33 五例；
+    `webview_bridge_coalesce_test.dart`：新增 D33 四例（三档判据 + 无样本）。
+  - `ios14-test.yml`：APP_VERSION_SUFFIX 045→**046**。
+- 本地验证（CI 同款 Dart 3.12.0）：
+  - dart format（6 文件）**0 changed，exit 0** ✅（首次 2 changed 已就地格式化后复跑通过）。
+  - `flutter test` gate + coalesce 两文件 **45/45 通过** ✅（含新增 D33 九例）。
+  - 注：首次给 gate_test 追加 D33 组时 `edit_file` 误替换了文件首个 `}`，导致
+    嵌套错位（10 例失败）；已 `git checkout` 该文件后用 python 追加到 main() 末尾修复。
+  - `dart analyze` diagnostics 5 info 经 `git stash` 对照确认**改动前即存在**（非本轮引入）。
+- commit `1a574e9d`；push 成功（`bfa4b2a1..1a574e9d`）；dispatch 422，无新 run 无包。
+- 下一步：老板恢复 Actions 后 dispatch 出 D19~D33 各包（046）；实机刷帖读诊断页
+  「闸门饱和时间占比（D33）」——≥70% → 继续把同源图片分流原生（D2/D19）；
+  <30% → 限流无贡献，转单请求成本（D16/D17/D32）或桥外因素。
+  SS 接管内置浏览器方向下轮交替。
