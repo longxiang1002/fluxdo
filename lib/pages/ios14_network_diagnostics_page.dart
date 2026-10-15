@@ -204,6 +204,10 @@ class _Ios14NetworkDiagnosticsPageState
       'gateVsTaxVerdict': s.gateVsTaxVerdict,
       'gateSaturationVerdict': s.gateSaturationVerdict,
       'gateTuningVerdict': s.gateTuningVerdict,
+      'bridgeByteTaxVerdict': s.bridgeByteTaxVerdict,
+      'binaryBridgeResponses': s.binaryBridgeResponses,
+      'binaryBridgeBytes': s.binaryBridgeBytes,
+      'binaryBridgeChunks': s.binaryBridgeChunks,
       'gateMaxConcurrent':
           WebViewAdapterSettingsService.instance.gateMaxConcurrent,
       'avgActiveConcurrency':
@@ -338,6 +342,17 @@ class _Ios14NetworkDiagnosticsPageState
               '闸门饱和度（D21）：${_bridge.gateSaturationVerdict}',
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
+          if (_bridge.bridgeByteTaxVerdict != null)
+            Text(
+              '跨桥字节搬运税（D25）：${_bridge.bridgeByteTaxVerdict}',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          Text(
+            '流路径固定成本（D25）：${_bridge.binaryBridgeResponses} 个流响应'
+            ' / ${_bridge.binaryBridgeChunks} 次分块回调'
+            ' / ${_bridge.binaryBridgeBytes}B'
+            '（每次回调 = 一次 JS↔native 边界穿越）',
+          ),
           Text(
             '走桥请求总数：${_bridge.totalRequests}'
             '（图片同源 ${_bridge.imageSameOrigin} / 图片其他 ${_bridge.imageOther}'

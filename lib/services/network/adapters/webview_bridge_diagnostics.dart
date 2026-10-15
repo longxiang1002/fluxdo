@@ -44,6 +44,30 @@ class WebViewBridgeDiagnostics {
   /// 说明分流前的桥负载主要来自图片；分流后它应趋近 0。
   int imageResponseBytes = 0;
 
+  /// D25: 二进制流响应走「WebMessageChannel 分块回传」的请求数。
+  ///
+  /// 动机（2026-10-13 深夜重定位）：D16/D17/D20/D21/D22 全都在回答
+  /// 「桥贵不贵 / 贵在哪 / 限流值不值得做」，但都建立在 [totalRequests]
+  /// 这个**混合口径**上——文本响应（`callHandler` 一次性回传）与二进制流
+  /// （`createWebMessageChannel` + 握手 + N 次分块回调）的固定成本相差一个
+  /// 数量级。若活跃刷帖时走桥的主要是二进制流，那么「每请求固定税」里真正
+  /// 的大头是**通道建立 + 分块回调**，砍脚本体积毫无收益，该砍的是走桥的
+  /// 流请求条数（即继续分流静态资源到原生栈）。
+  ///
+  /// 这三个计数与 [streamResponses] 的区别：[streamResponses] 是「桥搬了
+  /// 多少流」，这三个是「为了搬这些流，额外付了多少次跨语言边界穿越」——
+  /// 后者才是 CPU 峰值的直接来源。
+  int binaryBridgeResponses = 0;
+
+  /// D25: 上述流响应累计回传的字节量（与 [streamResponseBytes] 同口径，
+  /// 单独记一份便于与「固定成本」做比值）。
+  int binaryBridgeBytes = 0;
+
+  /// D25: 上述流响应累计的**分块回调次数**（Dart 侧 `setWebMessageCallback`
+  /// 被触发的次数）。每次回调都是一次 JS↔native 边界穿越 + 一次
+  /// `Uint8List` 分配，活跃滚动大图时与 chunk 数同阶。
+  int binaryBridgeChunks = 0;
+
   /// D14: 二进制流在 JS 侧合并前的原始 chunk 总数。
   ///
   /// 每个原始 chunk 本会各自触发一次 `postMessage` 跨 JS↔native 边界；
@@ -612,6 +636,68 @@ class WebViewBridgeDiagnostics {
   /// 复用同一常量语义：超过五分之一的请求排队即视为「闸门已在削峰」。
   static const int gateQueueHighRatio = gateQueueDominantRatio;
 
+  /// D25: 「跨桥字节搬运税」归因——回答「该砍走桥请求条数，还是砍单请求固定税」。
+  ///
+  /// 动机（2026-10-13 深夜重定位）：D16~D22 全部建立在 [totalRequests] 这个
+  /// **混合口径**上，但桥上有两条成本结构完全不同的路径：
+  ///   (a) **文本响应**：一次 `evaluateJavascript` + 一次 `callHandler` 回传，
+  ///       固定成本 ≈ 1 次跨语言往返，与请求数同阶；
+  ///   (b) **二进制流响应**：`createWebMessageChannel` 建通道 + `postWebMessage`
+  ///       握手 + 每个 chunk 一次 `setWebMessageCallback` 回调，固定成本
+  ///       ≈ 2 + N 次跨语言往返（N = chunk 数）。
+  ///
+  /// 两者相差一个数量级。若活跃期走桥请求里 (b) 占主导，那么「每请求固定税」
+  /// 的真实大头是**通道建立 + 分块回调**，此时：
+  ///   - 砍 JS 脚本体积 → 几乎无收益（脚本只影响 (a)）；
+  ///   - 把更多流请求分流到原生栈（D2 方向）→ 直接消掉整条 (b) 成本。
+  ///
+  /// 判据只用已聚合整数，纯派生、零采样、零新增运行时开销。返回 `null`
+  /// 表示样本不足（尚无走桥请求）。
+  String? get bridgeByteTaxVerdict {
+    if (totalRequests < bridgeCostMinSamples) return null;
+    final streamShare = binaryBridgeResponses * 100 / totalRequests;
+    final streamPct = streamShare.round();
+    final avgChunks = binaryBridgeResponses == 0
+        ? 0
+        : binaryBridgeChunks ~/ binaryBridgeResponses;
+    final avgBytes = binaryBridgeResponses == 0
+        ? 0
+        : binaryBridgeBytes ~/ binaryBridgeResponses;
+    final mb = binaryBridgeBytes / (1024 * 1024);
+
+    if (binaryBridgeResponses == 0) {
+      return '跨桥字节搬运税：本轮无二进制流走桥（$totalRequests 个走桥请求'
+          '全是文本路径）。文本路径固定成本 ≈ 1 次跨语言往返/请求，'
+          '此时「每请求固定税」与请求条数同阶 → 下一步优先**减少走桥请求条数**'
+          '（把更多只读/静态请求分流原生），砍脚本体积收益有限。';
+    }
+
+    if (streamShare >= bridgeByteTaxStreamDominantRatio) {
+      return '跨桥字节搬运税：**流路径主导**。$binaryBridgeResponses/$totalRequests'
+          '（$streamPct%）的走桥请求是二进制流，共 ${mb.toStringAsFixed(2)}MB、'
+          '$binaryBridgeChunks 次分块回调（平均每请求 $avgChunks 次回调 / '
+          '$avgBytes B）。每次回调都是一次 JS↔native 边界穿越 + 一次 Uint8List '
+          '分配，这才是活跃刷帖 CPU 峰值的直接来源。'
+          '下一步优先**减少走桥的流请求条数**（继续把静态资源分流原生栈），'
+          '而不是砍 JS 脚本体积。';
+    }
+
+    return '跨桥字节搬运税：**文本路径主导**。二进制流仅 '
+        '$binaryBridgeResponses/$totalRequests（$streamPct%），'
+        '合计 ${mb.toStringAsFixed(2)}MB / $binaryBridgeChunks 次回调。'
+        '桥的固定成本主要来自「每请求一次 evaluateJavascript + 一次 '
+        'callHandler 回传」，与请求条数同阶。'
+        '下一步优先**减少走桥请求条数**（分流只读/静态请求），'
+        '其次是合并调用/精简脚本；限流与砍传输收益都有限。';
+  }
+
+  /// D25: 判定「流路径主导」的流请求占走桥请求比例阈值（百分比）。
+  ///
+  /// 取 30：流路径的单请求固定成本（建通道 + 握手 + N 次回调）约为文本路径
+  /// 的数倍，因此占比不到三成时其总成本已可与文本路径相当。超过 30% 即
+  /// 认为「减少走桥流请求条数」是收益最高的方向。
+  static const int bridgeByteTaxStreamDominantRatio = 30;
+
   void reset() {
     imageSameOrigin = 0;
     imageOther = 0;
@@ -623,6 +709,9 @@ class WebViewBridgeDiagnostics {
     streamResponses = 0;
     streamResponseBytes = 0;
     imageResponseBytes = 0;
+    binaryBridgeResponses = 0;
+    binaryBridgeBytes = 0;
+    binaryBridgeChunks = 0;
     streamRawChunks = 0;
     streamCoalescedMessages = 0;
     requestBodyBase64 = 0;

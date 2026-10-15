@@ -929,6 +929,12 @@ document.close();
 
     bridge.done.whenComplete(() {
       bridgeStats.streamResponseBytes += bridge.bytesReceived;
+      // D25: 流路径的「固定成本」归因——建通道 + 握手 + N 次分块回调。
+      // 与 streamResponses 的区别：后者是「搬了多少」，这里是「为此额外付了
+      // 多少次跨语言边界穿越」。纯整数累加，零采样、零新增运行时开销。
+      bridgeStats.binaryBridgeResponses++;
+      bridgeStats.binaryBridgeBytes += bridge.bytesReceived;
+      bridgeStats.binaryBridgeChunks += bridge.chunksReceived;
       // D13: 同源图片走桥时的响应字节单独归因，用于对比 D2 分流收益。
       if (options.extra[resourceKindExtraKey]?.toString() ==
           resourceKindImage) {
