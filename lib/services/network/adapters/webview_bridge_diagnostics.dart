@@ -9,6 +9,15 @@
 /// - 不记录 URL/Headers/正文，无账户内容，只记类别计数与字节量。
 /// - 与 [DohRouteDiagnostics] 的「默认关闭 + 逐条队列」不同：那个要看清单独
 ///   请求链路，这里要的是总量画像，所以始终聚合、由诊断页在需要时重置。
+///
+/// D20 起本类还派生「闸门排队 vs 单请求固定税」归因，因此引用
+/// [WebViewBridgeGate] 与 [WebViewBridgeProbe] 的只读计数（无环，两者都不
+/// 反向依赖本类）。
+library;
+
+import 'webview_bridge_gate.dart';
+import 'webview_bridge_probe.dart';
+
 class WebViewBridgeDiagnostics {
   WebViewBridgeDiagnostics._();
 
@@ -433,6 +442,60 @@ class WebViewBridgeDiagnostics {
   /// 取 50：只有单段占到一半以上才算压倒性主导；低于此值说明三段均衡，
   /// 不宜把优化全部押在单段上。
   static const int bridgeTaxDominantRatio = 50;
+
+  /// D20: 活跃发热「闸门排队 vs 请求固定税」归因速判。
+  ///
+  /// 动机（2026-10-13 深夜重定位）：D16/D17 只回答「桥贵不贵、贵在哪」，
+  /// 但活跃刷帖发热有两种互斥成因，优化方向完全相反：
+  ///   (a) **并发洪峰排队**：活跃期大量请求同时挤闸门（[WebViewBridgeGate]），
+  ///       每个请求在飞时长被排队拉长，CPU 花在「等待 + 唤醒 + 分块回调」上。
+  ///       对策 = 继续下调并发上限、或把更多请求分流到原生栈（D2 方向）。
+  ///   (b) **单请求固定税**：并发本就不高（几乎不排队），但每个走桥请求都要付
+  ///       跨语言 evaluateJavascript + 分块回传的固定成本。对策 = 砍脚本体积、
+  ///       合并调用、减少走桥请求条数，而不是限流。
+  ///
+  /// 判据只用已聚合的整数计数（闸门排队/峰值 + 探针在飞时长/完成数），
+  /// 纯派生、零采样、零新增运行时开销。返回 `null` 表示样本不足。
+  ///
+  /// 阈值依据：[gateQueueDominantRatio] 取 20——活跃刷帖时若超过五分之一的
+  /// 走桥请求都因闸门满而排队，说明并发上限已是瓶颈；低于此值说明闸门基本
+  /// 没拦住谁，限流无收益。
+  String? get gateVsTaxVerdict {
+    final gate = WebViewBridgeGate.instance;
+    final probe = WebViewBridgeProbe.instance;
+    final avgInFlight = probe.averageInFlightMs;
+    if (totalRequests < bridgeCostMinSamples || avgInFlight == null) {
+      return null;
+    }
+    final queuedRatio = gate.queuedTotal / totalRequests;
+    final queuedPct = (queuedRatio * 100).round();
+    final avgMs = avgInFlight.toStringAsFixed(0);
+
+    if (queuedRatio >= gateQueueDominantRatio / 100) {
+      return '活跃发热归因 = 闸门排队主导：$queuedPct% 的走桥请求'
+          '（${gate.queuedTotal}/${totalRequests}）曾因并发上限 '
+          '${gate.maxConcurrent} 而排队，峰值排队 ${gate.peakWaiting} 个，'
+          '平均在飞 ${avgMs}ms。CPU 主要花在「排队等待 + 唤醒 + 分块回调」上。'
+          '下一步优先下调并发上限（4→3→2）或把更多只读请求分流原生栈，'
+          '而不是继续优化单次传输。';
+    }
+    if (avgInFlight >= bridgeCostHeavyMs) {
+      return '活跃发热归因 = 单请求固定税主导：闸门几乎不排队'
+          '（$queuedPct%，${gate.queuedTotal}/${totalRequests}），'
+          '但平均在飞 ${avgMs}ms 远超原生直连。CPU 花在每个请求的跨语言 '
+          'evaluateJavascript + 分块回传固定成本上，与并发无关。'
+          '下一步砍脚本体积/合并调用/减少走桥请求条数，限流无收益。';
+    }
+    return '活跃发热归因 = 桥非主因：闸门几乎不排队（$queuedPct%），'
+        '平均在飞 ${avgMs}ms 接近原生直连水平。'
+        '若活跃发热仍在，应转查渲染/图片解码/DoH 出口，而非继续优化桥。';
+  }
+
+  /// D20: 判定「闸门排队主导」的排队请求占比阈值（百分比）。
+  ///
+  /// 取 20：活跃刷帖时若超过五分之一的走桥请求都因闸门满而排队，
+  /// 说明并发上限已是瓶颈；低于此值说明闸门基本没拦住谁，限流无收益。
+  static const int gateQueueDominantRatio = 20;
 
   void reset() {
     imageSameOrigin = 0;

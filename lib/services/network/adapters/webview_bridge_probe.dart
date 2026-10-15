@@ -2,7 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
-import 'webview_bridge_diagnostics.dart';
+// 注：此处仅文档注释里以 [WebViewBridgeDiagnostics] 交叉引用，未实际使用其符号，
+// 故不 import（避免与 diagnostics 反向引用本类形成循环 import）。
 
 /// D12: WebView 桥「活跃期」探针——只统计，不改变任何请求行为。
 ///

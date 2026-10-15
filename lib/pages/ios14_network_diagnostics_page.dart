@@ -197,6 +197,7 @@ class _Ios14NetworkDiagnosticsPageState
       'activeLoadVerdict': s.activeLoadVerdict,
       'bridgeCostVerdict': s.bridgeCostVerdict,
       'bridgeTaxBreakdownVerdict': s.bridgeTaxBreakdownVerdict,
+      'gateVsTaxVerdict': s.gateVsTaxVerdict,
       'avgCookiePrepMs': s.totalRequests == 0
           ? 0
           : s.cookiePrepMs ~/ s.totalRequests,
@@ -314,6 +315,11 @@ class _Ios14NetworkDiagnosticsPageState
           if (_bridge.bridgeTaxBreakdownVerdict != null)
             Text(
               '桥固定税拆解（D17）：${_bridge.bridgeTaxBreakdownVerdict}',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          if (_bridge.gateVsTaxVerdict != null)
+            Text(
+              '闸门排队 vs 固定税归因（D20）：${_bridge.gateVsTaxVerdict}',
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
           Text(
