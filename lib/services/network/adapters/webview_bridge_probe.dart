@@ -57,6 +57,21 @@ class WebViewBridgeProbe {
   /// D21: 采样器处于「活跃期」的累计时长（毫秒），与 [inFlightIntegralMs] 配对。
   int activeSampledMs = 0;
 
+  /// D35: 采样器处于「空闲期」的累计时长（毫秒）——采样器在跑但这一秒没有
+  /// 请求在飞。
+  ///
+  /// 动机（2026-10-13 深夜重定位：活跃刷帖时发热）：
+  /// D21 只算了「活跃期平均并发」，但**活跃期本身占了多少时间**从未被测量。
+  /// 若刷帖时桥几乎一直有请求在飞（活跃占比高），说明负载是**持续**的，
+  /// 降低单请求开销（D16/D17）才有意义；若活跃占比很低（大量空闲间隙），
+  /// 说明发热更可能来自「每次活跃的启停抖动」（采样器反复启停、WebView
+  /// 空闲后被唤醒），优化方向应转向减少启停次数而非单请求耗时。
+  ///
+  /// 与 [activeSampledMs] 配对，二者之和即采样器运行的总时长。
+  /// 纯整数累加，只在采样器运行期间发生，空闲零开销；不触碰任何
+  /// WebView 挂起/暂停 API，不阻塞 JS。
+  int idleSampledMs = 0;
+
   int _inFlight = 0;
   Timer? _sampler;
   Stopwatch? _activeWatch;
@@ -125,6 +140,8 @@ class WebViewBridgeProbe {
         inFlightIntegralMs += _inFlight * sampleInterval.inMilliseconds;
       } else {
         idleSamples++;
+        // D35: 这一秒没有请求在飞——把整秒记到空闲期，与活跃期配对。
+        idleSampledMs += sampleInterval.inMilliseconds;
       }
     });
   }
@@ -141,6 +158,46 @@ class WebViewBridgeProbe {
     }
   }
 
+  /// D35: 采样器运行的总时长（毫秒）= 活跃期 + 空闲期。
+  int get sampledTotalMs => activeSampledMs + idleSampledMs;
+
+  /// D35: 桥「活跃时长占比」（0~100 的整数百分比）；无样本返回 null。
+  ///
+  /// 这是「活跃刷帖时桥到底有多忙」的时间维度答案：占比高（如 >80%）
+  /// 说明刷帖期间桥几乎一直在工作，发热是**持续负载**造成的，应继续
+  /// 削单请求开销；占比低说明活跃是**间歇**的，发热更可能来自启停抖动，
+  /// 应转向减少启停次数。纯派生、零采样、零新增运行时开销。
+  int? get activeTimeSharePct {
+    final total = sampledTotalMs;
+    if (total <= 0) return null;
+    return (activeSampledMs * 100 / total).round();
+  }
+
+  /// D35: 活跃时长占比速判——回答「活跃刷帖时桥是持续忙还是间歇忙」。
+  ///
+  /// 判据只用已聚合整数，纯派生、零采样、零新增运行时开销。返回 `null`
+  /// 表示样本不足。
+  String? get activeTimeVerdict {
+    final pct = activeTimeSharePct;
+    if (pct == null) return null;
+    final head =
+        '桥活跃时长占比（D35）：活跃 $activeSampledMs ms / '
+        '空闲 $idleSampledMs ms，活跃占 $pct%。';
+    if (pct >= 80) {
+      return '$head **桥几乎一直在忙**——活跃刷帖时负载是持续的，'
+          '发热来自单请求开销的累积；下一步继续削单请求成本'
+          '（D16/D17 三段耗时、D3 避免 base64 回退）。';
+    }
+    if (pct >= 40) {
+      return '$head **桥忙闲参半**——负载呈脉冲式；'
+          '可在削单请求开销的同时，评估把同源图片继续分流原生（D2/D19）'
+          '以拉低每个脉冲的高度。';
+    }
+    return '$head **桥大部分时间空闲**——活跃是间歇性的，'
+        '发热更可能来自每次活跃的启停抖动（采样器反复启停、WebView 唤醒），'
+        '下一步转向减少启停次数（合并请求、拉长空闲判定窗口）。';
+  }
+
   /// 诊断页重置时调用：清空计数并停表。
   void reset() {
     _stopSampler();
@@ -151,6 +208,7 @@ class WebViewBridgeProbe {
     completedRequests = 0;
     inFlightIntegralMs = 0;
     activeSampledMs = 0;
+    idleSampledMs = 0;
     _inFlight = 0;
   }
 

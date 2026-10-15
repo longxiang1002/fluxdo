@@ -289,6 +289,9 @@ class _Ios14NetworkDiagnosticsPageState
       'avgActiveConcurrency':
           WebViewBridgeProbe.instance.averageActiveConcurrency,
       'activeSampledMs': WebViewBridgeProbe.instance.activeSampledMs,
+      'idleSampledMs': WebViewBridgeProbe.instance.idleSampledMs,
+      'activeTimeSharePct': WebViewBridgeProbe.instance.activeTimeSharePct,
+      'activeTimeVerdict': WebViewBridgeProbe.instance.activeTimeVerdict,
       'avgCookiePrepMs': s.totalRequests == 0
           ? 0
           : s.cookiePrepMs ~/ s.totalRequests,
@@ -674,6 +677,16 @@ class _Ios14NetworkDiagnosticsPageState
             ' / 其它 ${_bridge.otherTotalMs}ms）；'
             '其中排队占 ${_bridge.queueShareOfEndToEndPct ?? 0}%'
             '（= 端到端里有多少时间卡在闸门外）',
+          ),
+          if (_probe.activeTimeVerdict != null)
+            Text(
+              '桥活跃时长占比（D35）：${_probe.activeTimeVerdict}',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          Text(
+            '活跃/空闲计时（D35）：活跃 ${_probe.activeSampledMs}ms'
+            ' / 空闲 ${_probe.idleSampledMs}ms'
+            '（采样器每秒按「有/无请求在飞」记一笔，无新增定时器）',
           ),
           const Text(
             '判读：累计排队明显 > 0 且平均在飞时长下降 → 限流生效，'

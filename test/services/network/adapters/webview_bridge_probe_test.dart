@@ -67,4 +67,59 @@ void main() {
     expect(probe.completedRequests, 0);
     expect(probe.inFlight, 0);
   });
+
+  group('D35 桥活跃时长占比', () {
+    test('无样本时占比与判据均为 null', () {
+      expect(probe.activeTimeSharePct, isNull);
+      expect(probe.activeTimeVerdict, isNull);
+      expect(probe.sampledTotalMs, 0);
+    });
+
+    test('空闲计时与活跃计时配对，占比可算', () {
+      // 直接注入已聚合整数（不依赖真实定时器）。
+      probe.activeSampledMs = 9000;
+      probe.idleSampledMs = 1000;
+
+      expect(probe.sampledTotalMs, 10000);
+      expect(probe.activeTimeSharePct, 90);
+    });
+
+    test('占比 >=80% 判为「桥几乎一直在忙」', () {
+      probe.activeSampledMs = 8500;
+      probe.idleSampledMs = 1500;
+
+      final verdict = probe.activeTimeVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('桥几乎一直在忙'));
+      expect(verdict, contains('85%'));
+    });
+
+    test('占比 40~80% 判为「桥忙闲参半」', () {
+      probe.activeSampledMs = 5000;
+      probe.idleSampledMs = 5000;
+
+      final verdict = probe.activeTimeVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('桥忙闲参半'));
+    });
+
+    test('占比 <40% 判为「桥大部分时间空闲」', () {
+      probe.activeSampledMs = 2000;
+      probe.idleSampledMs = 8000;
+
+      final verdict = probe.activeTimeVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('桥大部分时间空闲'));
+    });
+
+    test('reset 一并清零空闲计时', () {
+      probe.activeSampledMs = 5000;
+      probe.idleSampledMs = 5000;
+      probe.reset();
+
+      expect(probe.idleSampledMs, 0);
+      expect(probe.activeSampledMs, 0);
+      expect(probe.activeTimeSharePct, isNull);
+    });
+  });
 }
