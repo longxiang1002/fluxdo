@@ -545,6 +545,73 @@ class WebViewBridgeDiagnostics {
   /// 低于此值说明桥有余量，限流不是首要靶点。
   static const double gateSaturationRatio = 0.75;
 
+  /// D22: 「下调并发上限」是否值得做实验的合并判据。
+  ///
+  /// 动机（2026-10-13 深夜重定位）：D20（排队占比）与 D21（闸门饱和度）各自
+  /// 只能回答一半问题，且**单独看会互相打架**：
+  ///   - 排队占比高 → 说明闸门已在削峰，继续下调上限只会让排队更长；
+  ///   - 饱和度低（并发远未打满）→ 说明活跃期并发本就不高，限流无收益；
+  ///   - 饱和度**高**且排队占比**低** → 这才是「上限恰好卡住活跃负载」的
+  ///     特征：闸门一直贴着上限跑（说明需求 ≥ 上限），但还没到大量排队
+  ///     （说明上限没低到伤吞吐）。此时下调上限（4→3→2）是最有希望的
+  ///     降热实验，因为每减少一个并发名额就少一条同时在飞的跨语言回传链。
+  ///
+  /// 本 getter 把两者合成一句**可执行**结论，避免老板在诊断页上自己对着
+  /// 两个数字做推理。纯派生计算，只用已聚合整数，零采样、零新增开销。
+  /// 返回 `null` 表示样本不足。
+  String? get gateTuningVerdict {
+    final gate = WebViewBridgeGate.instance;
+    final probe = WebViewBridgeProbe.instance;
+    final avgConcurrency = probe.averageActiveConcurrency;
+    if (avgConcurrency == null || totalRequests < bridgeCostMinSamples) {
+      return null;
+    }
+    final cap = gate.maxConcurrent;
+    if (cap == 0) return null;
+    final satRatio = avgConcurrency / cap;
+    final satPct = (satRatio * 100).round();
+    final queuedPct = (gate.queuedTotal * 100 / totalRequests).round();
+    final satHigh = satRatio >= gateSaturationRatio;
+    final queueHigh =
+        gate.queuedTotal * 100 >= totalRequests * gateQueueDominantRatio;
+
+    if (satHigh && !queueHigh) {
+      return '限流实验建议：**值得做**。活跃期平均并发 '
+          '${avgConcurrency.toStringAsFixed(2)}/$cap（$satPct%）已贴近上限，'
+          '但排队仅 $queuedPct%（${gate.queuedTotal}/${totalRequests}）——'
+          '正是「上限恰好卡住活跃负载」的特征。'
+          '下一步把上限下调一档（$cap→${cap - 1}）再刷一轮，'
+          '对比活跃期平均并发与发热是否同步下降；若发热明显改善则继续降到 '
+          '${cap - 2}，直到排队占比明显抬升（说明已伤吞吐）为止。';
+    }
+    if (satHigh && queueHigh) {
+      return '限流实验建议：**已过头**。活跃期平均并发 '
+          '${avgConcurrency.toStringAsFixed(2)}/$cap（$satPct%）贴近上限，'
+          '且排队已达 $queuedPct%（${gate.queuedTotal}/${totalRequests}）——'
+          '闸门已在明显削峰，再下调上限只会让排队更长、单个请求在飞更久，'
+          'CPU 花在等待/唤醒上。下一步**不要**继续降上限，'
+          '改为把更多只读请求分流到原生栈（图片分流已默认开启，可再看其它静态资源）。';
+    }
+    if (!satHigh && queueHigh) {
+      return '限流实验建议：**先查排队来源**。活跃期平均并发 '
+          '${avgConcurrency.toStringAsFixed(2)}/$cap（$satPct%）未打满，'
+          '却有 $queuedPct%（${gate.queuedTotal}/${totalRequests}）的请求排队——'
+          '通常意味着并发是**短时突发**（洪峰瞬间挤满、均值被拉低）。'
+          '下一步先看突发来源（滚动时图片/API 是否同时涌入），'
+          '优先做分流而非限流。';
+    }
+    return '限流实验建议：**无收益**。活跃期平均并发 '
+        '${avgConcurrency.toStringAsFixed(2)}/$cap（$satPct%）远未打满，'
+        '排队也仅 $queuedPct%。桥在活跃期有大量余量，'
+        '限流不会降低发热。下一步转查渲染/图片解码/DoH 出口，'
+        '或核对同源图片分流是否被 CF 403 回退。';
+  }
+
+  /// D22: 判定「排队占比高」的阈值（百分比），与 [gateQueueDominantRatio] 同源。
+  ///
+  /// 复用同一常量语义：超过五分之一的请求排队即视为「闸门已在削峰」。
+  static const int gateQueueHighRatio = gateQueueDominantRatio;
+
   void reset() {
     imageSameOrigin = 0;
     imageOther = 0;

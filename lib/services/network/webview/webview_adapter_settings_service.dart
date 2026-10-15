@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../constants.dart';
+import '../adapters/webview_bridge_gate.dart';
 
 /// WebView 适配器设置服务
 ///
@@ -47,6 +48,32 @@ class WebViewAdapterSettingsService {
   /// 设置同源图片分流开关（诊断页 A/B 试验用，运行时可切换）。
   void setImageNativeRouting(bool value) {
     imageNativeRoutingNotifier.value = value;
+  }
+
+  /// D22：桥并发闸门上限的运行时 A/B 开关（默认 4，与 D13 初值一致）。
+  ///
+  /// 动机（2026-10-13 深夜重定位）：D20/D21 已能判「限流值不值得做」，
+  /// 但判完还得改代码 + 重出包才能试。这里把上限做成**运行时可选**，
+  /// 老板在诊断页一键切 4→3→2，刷一轮就能对比活跃期平均并发与发热，
+  /// 无需每档都等一次 CI 出包。
+  ///
+  /// 只影响 [WebViewBridgeGate.maxConcurrent]，不动任何 WebView 挂起/暂停
+  /// API，也不改变请求语义（只是让超出的请求在 Dart 侧 Completer 队列上
+  /// 多等一会儿，不阻塞 JS 执行）。
+  final ValueNotifier<int> gateMaxConcurrentNotifier = ValueNotifier(
+    WebViewBridgeGate.defaultMaxConcurrent,
+  );
+
+  /// 当前桥并发上限。
+  int get gateMaxConcurrent => gateMaxConcurrentNotifier.value;
+
+  /// 设置桥并发上限（诊断页 A/B 试验用，运行时即切即生效）。
+  ///
+  /// 下限保护为 1：0 会让所有走桥请求永久排队（闸门永不释放名额）。
+  void setGateMaxConcurrent(int value) {
+    if (value < 1) return;
+    gateMaxConcurrentNotifier.value = value;
+    WebViewBridgeGate.instance.maxConcurrent = value;
   }
 
   SharedPreferences? _prefs;

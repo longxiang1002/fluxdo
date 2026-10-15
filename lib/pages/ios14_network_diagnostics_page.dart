@@ -58,6 +58,8 @@ class _Ios14NetworkDiagnosticsPageState
     _settings.isApplying.addListener(_changed);
     WebViewAdapterSettingsService.instance.imageNativeRoutingNotifier
         .addListener(_changed);
+    WebViewAdapterSettingsService.instance.gateMaxConcurrentNotifier
+        .addListener(_changed);
   }
 
   void _changed() {
@@ -69,6 +71,8 @@ class _Ios14NetworkDiagnosticsPageState
     _settings.notifier.removeListener(_changed);
     _settings.isApplying.removeListener(_changed);
     WebViewAdapterSettingsService.instance.imageNativeRoutingNotifier
+        .removeListener(_changed);
+    WebViewAdapterSettingsService.instance.gateMaxConcurrentNotifier
         .removeListener(_changed);
     super.dispose();
   }
@@ -199,6 +203,9 @@ class _Ios14NetworkDiagnosticsPageState
       'bridgeTaxBreakdownVerdict': s.bridgeTaxBreakdownVerdict,
       'gateVsTaxVerdict': s.gateVsTaxVerdict,
       'gateSaturationVerdict': s.gateSaturationVerdict,
+      'gateTuningVerdict': s.gateTuningVerdict,
+      'gateMaxConcurrent':
+          WebViewAdapterSettingsService.instance.gateMaxConcurrent,
       'avgActiveConcurrency':
           WebViewBridgeProbe.instance.averageActiveConcurrency,
       'activeSampledMs': WebViewBridgeProbe.instance.activeSampledMs,
@@ -476,6 +483,38 @@ class _Ios14NetworkDiagnosticsPageState
             '可继续下调上限（4→3→2）找最优；排队为 0 → 活跃期并发本就不高，'
             '限流无收益，转查 CF 刷新重建频率或响应侧序列化。'
             '闸门只在 Dart 侧排队，不挂起 WebView、不阻塞 JS 执行。',
+          ),
+          Text(
+            '限流实验建议（D22）：${_bridge.gateTuningVerdict}',
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+          Text(
+            '运行时并发上限（D22 A/B）：'
+            '${WebViewAdapterSettingsService.instance.gateMaxConcurrent} 个',
+          ),
+          Wrap(
+            spacing: 8,
+            children: [
+              for (final cap in const [2, 3, 4, 6])
+                ChoiceChip(
+                  label: Text('$cap'),
+                  selected:
+                      WebViewAdapterSettingsService
+                          .instance
+                          .gateMaxConcurrent ==
+                      cap,
+                  onSelected: (_) => setState(() {
+                    WebViewAdapterSettingsService.instance.setGateMaxConcurrent(
+                      cap,
+                    );
+                  }),
+                ),
+            ],
+          ),
+          const Text(
+            '切换后即生效（无需重出包）：每降一档就少一条同时在飞的跨语言回传链。'
+            '刷一轮后看「活跃期平均并发」与发热是否同步下降；'
+            '若排队占比明显抬升说明已伤吞吐，回调一档。',
           ),
           OutlinedButton(
             onPressed: () => setState(() {
