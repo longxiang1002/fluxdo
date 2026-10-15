@@ -122,4 +122,57 @@ void main() {
       expect(probe.activeTimeSharePct, isNull);
     });
   });
+
+  group('D36 流在途修正', () {
+    test('初始流在途计数为 0', () {
+      expect(probe.streamInFlight, 0);
+    });
+
+    test('onStreamStart/onStreamEnd 成对增减', () {
+      probe.onStreamStart();
+      probe.onStreamStart();
+      expect(probe.streamInFlight, 2);
+
+      probe.onStreamEnd();
+      expect(probe.streamInFlight, 1);
+
+      probe.onStreamEnd();
+      expect(probe.streamInFlight, 0);
+    });
+
+    test('多余的 onStreamEnd 不会让计数变负', () {
+      probe.onStreamEnd();
+      expect(probe.streamInFlight, 0);
+    });
+
+    test('无样本时口径说明为 null', () {
+      expect(probe.streamAwareVerdict, isNull);
+    });
+
+    test('有样本时口径说明含在途条数', () {
+      probe.activeSampledMs = 9000;
+      probe.idleSampledMs = 1000;
+      probe.onStreamStart();
+
+      final verdict = probe.streamAwareVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('D36'));
+      expect(verdict, contains('在途 1 条'));
+    });
+
+    test('reset 一并清零流在途计数', () {
+      probe.onStreamStart();
+      probe.onStreamStart();
+      probe.reset();
+
+      expect(probe.streamInFlight, 0);
+    });
+
+    test('resetInFlightForTest 一并清零流在途计数', () {
+      probe.onStreamStart();
+      probe.resetInFlightForTest();
+
+      expect(probe.streamInFlight, 0);
+    });
+  });
 }

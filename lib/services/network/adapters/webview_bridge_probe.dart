@@ -76,6 +76,42 @@ class WebViewBridgeProbe {
   Timer? _sampler;
   Stopwatch? _activeWatch;
 
+  /// D36: 响应体仍在途的二进制流请求数。
+  ///
+  /// 动机（2026-10-13 深夜重定位：活跃刷帖时发热）：
+  /// 桥适配器的 `finally`（调用 [onRequestEnd]）对**二进制流**请求在
+  /// 「收到响应头」时就执行了，而响应体还要经 WebMessageChannel 分块回传
+  /// 很久。这段时间桥其实**仍在工作**，却因为 [_inFlight] 已归零而被采样器
+  /// 记成「空闲」，导致 D35 的「桥活跃时长占比」被系统性低估，进而可能把
+  /// 「持续负载」误判为「间歇负载」，把优化方向指错。
+  ///
+  /// 适配器在流开始时 [onStreamStart]、流结束时 [onStreamEnd]，这里只维护
+  /// 一个整数计数，采样器判定活跃时把它一并算上。纯整数加减，
+  /// 不新增定时器、不触碰任何 WebView 挂起/暂停 API，不阻塞 JS。
+  int _streamInFlight = 0;
+
+  /// D36: 当前仍在回传响应体的二进制流请求数（只读，供诊断页展示）。
+  int get streamInFlight => _streamInFlight;
+
+  /// D36: 二进制流响应体开始回传时调用（在收到响应头之后）。
+  ///
+  /// 只加计数并确保采样器在跑——若此时 [_inFlight] 已归零、采样器已停，
+  /// 这里会把它重新启动，从而把「流回传期」也纳入活跃计时。
+  void onStreamStart() {
+    _streamInFlight++;
+    _ensureSampler();
+  }
+
+  /// D36: 二进制流响应体回传结束时调用（成功/失败/取消都要调）。
+  void onStreamEnd() {
+    if (_streamInFlight > 0) {
+      _streamInFlight--;
+    }
+    if (_inFlight == 0 && _streamInFlight == 0) {
+      _stopSampler();
+    }
+  }
+
   /// 采样周期：1s。仅在「有请求在飞」时启动，归零即停。
   static const Duration sampleInterval = Duration(seconds: 1);
 
@@ -95,7 +131,8 @@ class WebViewBridgeProbe {
     }
     inFlightMs += inFlight.inMilliseconds;
     completedRequests++;
-    if (_inFlight == 0) {
+    // D36: 只有「没有请求在飞」且「没有流在回传」时才停表。
+    if (_inFlight == 0 && _streamInFlight == 0) {
       _stopSampler();
     }
   }
@@ -134,7 +171,9 @@ class WebViewBridgeProbe {
     // D21: 活跃期计时与积分只在采样器运行期间累加（即确实有请求在飞时）。
     _activeWatch = Stopwatch()..start();
     _sampler = Timer.periodic(sampleInterval, (_) {
-      if (_inFlight > 0) {
+      // D36: 判定「桥是否在工作」时把仍在回传响应体的流也算上——
+      // 流路径的 onRequestEnd 在收到响应头时就跑了，但桥仍在搬字节。
+      if (_inFlight > 0 || _streamInFlight > 0) {
         concurrencySamples++;
         // D21: 每秒把当前在飞数积进总分（时间 × 并发度）。
         inFlightIntegralMs += _inFlight * sampleInterval.inMilliseconds;
@@ -167,6 +206,9 @@ class WebViewBridgeProbe {
   /// 说明刷帖期间桥几乎一直在工作，发热是**持续负载**造成的，应继续
   /// 削单请求开销；占比低说明活跃是**间歇**的，发热更可能来自启停抖动，
   /// 应转向减少启停次数。纯派生、零采样、零新增运行时开销。
+  ///
+  /// D36 修正：活跃判定已把「仍在回传响应体的二进制流」计入（见
+  /// [_streamInFlight]），因此本值不再因流路径提前结束而虚低。
   int? get activeTimeSharePct {
     final total = sampledTotalMs;
     if (total <= 0) return null;
@@ -198,6 +240,20 @@ class WebViewBridgeProbe {
         '下一步转向减少启停次数（合并请求、拉长空闲判定窗口）。';
   }
 
+  /// D36: 活跃时长口径自检——回答「活跃占比是否被流路径的提前结束低估」。
+  ///
+  /// 动机：二进制流请求的 `onRequestEnd` 在收到响应头时就执行了，响应体
+  /// 回传期曾被误记为「空闲」。D36 已把这段计入活跃（见 [_streamInFlight]），
+  /// 本判据用于让诊断页**显式说明口径已修正**，避免把修正后的高占比误读成
+  /// 「负载变重了」。纯派生，零采样、零新增运行时开销。
+  String? get streamAwareVerdict {
+    final pct = activeTimeSharePct;
+    if (pct == null) return null;
+    return '桥活跃口径（D36）：已把「响应体仍在回传的二进制流」计入活跃期'
+        '（当前在途 $streamInFlight 条）。因此本页活跃占比不再被流路径的'
+        '提前结束低估；若与旧版本相比占比升高，属**口径修正**而非负载变重。';
+  }
+
   /// 诊断页重置时调用：清空计数并停表。
   void reset() {
     _stopSampler();
@@ -209,6 +265,7 @@ class WebViewBridgeProbe {
     inFlightIntegralMs = 0;
     activeSampledMs = 0;
     idleSampledMs = 0;
+    _streamInFlight = 0;
     _inFlight = 0;
   }
 
@@ -217,5 +274,6 @@ class WebViewBridgeProbe {
   void resetInFlightForTest() {
     _stopSampler();
     _inFlight = 0;
+    _streamInFlight = 0;
   }
 }

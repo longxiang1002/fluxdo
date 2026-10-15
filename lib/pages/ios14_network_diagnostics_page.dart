@@ -292,6 +292,8 @@ class _Ios14NetworkDiagnosticsPageState
       'idleSampledMs': WebViewBridgeProbe.instance.idleSampledMs,
       'activeTimeSharePct': WebViewBridgeProbe.instance.activeTimeSharePct,
       'activeTimeVerdict': WebViewBridgeProbe.instance.activeTimeVerdict,
+      'streamInFlight': WebViewBridgeProbe.instance.streamInFlight,
+      'streamAwareVerdict': WebViewBridgeProbe.instance.streamAwareVerdict,
       'avgCookiePrepMs': s.totalRequests == 0
           ? 0
           : s.cookiePrepMs ~/ s.totalRequests,
@@ -687,6 +689,11 @@ class _Ios14NetworkDiagnosticsPageState
             '活跃/空闲计时（D35）：活跃 ${_probe.activeSampledMs}ms'
             ' / 空闲 ${_probe.idleSampledMs}ms'
             '（采样器每秒按「有/无请求在飞」记一笔，无新增定时器）',
+          ),
+          Text(
+            '流在途修正（D36）：当前仍在回传响应体的二进制流 '
+            '${_probe.streamInFlight} 条；'
+            '${_probe.streamAwareVerdict ?? "暂无样本"}',
           ),
           const Text(
             '判读：累计排队明显 > 0 且平均在飞时长下降 → 限流生效，'

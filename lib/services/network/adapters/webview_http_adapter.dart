@@ -92,6 +92,20 @@ class WebViewHttpAdapter implements HttpClientAdapter {
   /// 每个请求在 acquire 前先置 0，避免沿用上一条请求的值。
   int _lastQueueWaitMs = 0;
 
+  /// D36: 本请求的响应体目前是否仍「在途」（二进制流尚未收到 complete）。
+  ///
+  /// 动机（2026-10-13 深夜重定位：活跃刷帖时发热）：
+  /// D26/D31/D34 都按「请求结束（Dart 侧 `fetch` 的 finally）」落账，
+  /// 但**二进制流路径**的 `finally` 在「收到响应头」时就跑了——响应体
+  /// 还要经 WebMessageChannel 分块回传很久。于是流请求的「占用桥的时长」
+  /// 被系统性低估，且这部分时间被错记到**下一条**请求头上（因为
+  /// [WebViewBridgeProbe.onRequestStart] 在 fetch 开头就 +1 了），
+  /// 导致「桥活跃时长占比」被虚高。
+  ///
+  /// 本字段让 [WebViewBridgeProbe] 的采样器知道「还有流在途」，
+  /// 从而把流回传期也正确计入活跃期。只存一个布尔，零采样、零新增定时器。
+  bool _bridgeStreamInFlight = false;
+
   /// 初始化 WebView
   Future<void> initialize() async {
     if (_isInitialized && _controller != null) return;
@@ -460,6 +474,11 @@ document.close();
       _recordBridgeBodyShape(bridgeStats, bodyPlan.shape);
 
       if (wantsBinaryStream) {
+        // D36: 标记「本请求的响应体仍在途」——流路径的 finally 在收到响应头
+        // 时就跑了，而响应体还要经 WebMessageChannel 分块回传很久。置位后
+        // 采样器会把回传期正确算作活跃，避免活跃时长占比被低估。
+        _bridgeStreamInFlight = true;
+        WebViewBridgeProbe.instance.onStreamStart();
         final response = await _fetchBinaryStreamResponse(
           options,
           requestClass: requestClass,
@@ -1134,6 +1153,9 @@ document.close();
     bridgeStats.jsEvalMs += jsEvalElapsed.inMilliseconds;
 
     bridge.done.whenComplete(() {
+      // D36: 响应体回传结束——清掉「在途」标记，让采样器回到按在飞数判定。
+      _bridgeStreamInFlight = false;
+      WebViewBridgeProbe.instance.onStreamEnd();
       bridgeStats.streamResponseBytes += bridge.bytesReceived;
       // D25: 流路径的「固定成本」归因——建通道 + 握手 + N 次分块回调。
       // 与 streamResponses 的区别：后者是「搬了多少」，这里是「为此额外付了
