@@ -2400,3 +2400,31 @@ push `98f27565` + `483a18f1`（`APP_VERSION_SUFFIX` 017→**018**）→ **#60**�
   「闸门饱和时间占比（D33）」——≥70% → 继续把同源图片分流原生（D2/D19）；
   <30% → 限流无贡献，转单请求成本（D16/D17/D32）或桥外因素。
   SS 接管内置浏览器方向下轮交替。
+
+## 2026-10-16 02:00 CST — D34 端到端桥代价按类别归因（CI 冻结第 15 轮）
+- 前置核对：#78 `a4f8ac9c` success（Release ios14-test-78 已出）；#77/#76 success；
+  无遗留 failure、无缺 Release。Actions 仍账号级冻结：本轮 dispatch 仍 422
+  （"Actions has been disabled for this repository."），runs total 恒 78。
+- 本轮改动（D34，纯 Dart 侧计数与派生判据，不碰 WebView 挂起/暂停 API，不阻塞 JS）：
+  - `webview_bridge_diagnostics.dart`：新增 5 个类别端到端计数
+    （imageSameOrigin/Other、apiGet/Write、other × TotalMs）、`totalEndToEndMs`、
+    `queueShareOfEndToEndPct`（端到端里排队占多少）、
+    `endToEndAttributionVerdict`（压图片→继续分流原生；压 API→合并调用/降条数；
+    均不突出→转查桥外渲染/解码/DoH 出口）；`reset` 同步清零。
+  - `webview_http_adapter.dart`：新增实例字段 `_lastQueueWaitMs`（acquire 前置 0，
+    闸门回调写入）、`_recordClassEndToEnd`；在 `finally` 里 release 之后
+    以「进桥耗时 + 本次排队耗时」落一次端到端账（文本/流两条路径共用同一 finally）。
+  - `ios14_network_diagnostics_page.dart`：桥区展示「端到端桥代价归因(D34)」
+    「端到端桥代价(D34)」；报告 map 加 8 个字段。
+  - `webview_bridge_coalesce_test.dart`：新增 D34 六例。
+  - `ios14-test.yml`：APP_VERSION_SUFFIX 046→**047**。
+- 本地验证（CI 同款 Dart 3.12.0 / Flutter 3.44.0）：
+  - dart format（4 文件）**0 changed，exit 0** ✅。
+  - `flutter test` coalesce + gate 两文件 **51/51 通过** ✅（含新增 D34 六例）。
+  - `dart analyze` / `flutter analyze` 在本机 **analysis server 被 OOM kill（exit -9）**，
+    是 2 核 3.7G 机器内存限制所致（非代码错误）；tests 通过即证明改动文件可编译。
+- commit `7d13c109`；push 成功（`4b482d3e..7d13c109`）；dispatch 422，无新 run 无包。
+- 下一步：老板恢复 Actions 后 dispatch 出 D19~D34 各包（047）；实机刷帖读诊断页
+  「端到端桥代价归因(D34)」——压图片→继续分流原生(D2/D19)；
+  压 API→合并调用/降条数(D16/D17)；均不突出→桥外因素。
+  SS 接管内置浏览器方向下轮交替。

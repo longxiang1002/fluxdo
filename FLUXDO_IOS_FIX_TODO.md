@@ -411,3 +411,26 @@ push `16c4b3d2` 成功（origin 已同步）；dispatch 与 push 触发均被账
 2. 实机刷帖交叉读 D26「类别耗时归因」与 D31「排队耗时归因」定靶：
    两者同指图片 → 图片分流/权重继续加码；D26 指 API 读 → 走 D3 桥内降开销或合并调用。
 3. SS 接管内置浏览器（P1 iOS14 管道替代）方向下轮交替推进。
+
+## D34（2026-10-16 02:00 CST）— 端到端桥代价按请求类别归因（CI 冻结第 15 轮）
+### 完成
+- [x] 核对 CI：#78/#77/#76 success，无遗留 failure、无缺 Release；Actions 仍冻结（dispatch 422，runs 恒 78）。
+- [x] **D34 改动**（纯 Dart 计数/派生判据，零 WebView 挂起/暂停 API、不阻塞 JS）：
+      `webview_bridge_diagnostics.dart` 新增 5 个 `*TotalMs`（端到端 = 进桥 + 排队）、
+      `totalEndToEndMs`/`queueShareOfEndToEndPct`/`endToEndAttributionVerdict`；
+      `webview_http_adapter.dart` 新增 `_lastQueueWaitMs`（acquire 前置 0、闸门回调写入）
+      与 `_recordClassEndToEnd`，在 finally 里 release 后按「进桥耗时 + 排队耗时」落账；
+      诊断页展示端到端归因与明细 + 报告 8 字段；coalesce 单测新增 D34 六例；
+      `ios14-test.yml` 后缀 046→047。
+- [x] 本地验证：dart format（CI 同款 3.12.0）4 文件 0 changed exit 0；
+      flutter test coalesce+gate **51/51 通过**（含 D34 六例）。
+      注：`dart analyze`/`flutter analyze` 本机 analysis server 被 OOM kill（exit -9），
+      系 2 核 3.7G 内存限制，非代码错误；tests 通过即证明改动文件可编译。
+- [x] commit `7d13c109`，push 成功。
+### 未完成
+- Actions 账号级冻结（dispatch 422），无新 run、无新包。
+### 下一步
+1. 老板恢复 GitHub Actions 后 dispatch 出 D19~D34 各包（`0.2.28.047`）。
+2. 实机刷帖读诊断页「端到端桥代价归因(D34)」：压图片→继续分流原生(D2/D19)；
+   压 API→合并调用/降条数(D16/D17)；均不突出→转查桥外（渲染/解码/DoH 出口）。
+3. SS 接管内置浏览器（P1 iOS14 管道替代）方向下轮交替推进。
