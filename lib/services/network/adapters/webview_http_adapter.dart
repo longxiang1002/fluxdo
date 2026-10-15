@@ -292,6 +292,15 @@ document.close();
   ) async {
     setRequestAdapterLogName(options, 'webview');
     _activeFetches++;
+    // D26: 先给这条请求定类别——既用于结束时的桥内耗时归因，也用于
+    // D31 的「排队等待」归因（排队发生在 acquire 里，必须先有类别）。
+    // 分类只读请求元数据，不解析 URL 内容、不触碰 WebView，零额外开销。
+    final requestUri = options.uri;
+    final requestClass = _recordBridgeRequestKind(
+      options,
+      requestUri,
+      options.method.toUpperCase(),
+    );
     // D13: 桥并发闸门——超出上限的请求在 Dart 侧排队，避免一起涌进单条 JS 线程。
     // 等待只发生在 Dart 的 Completer 队列上，不触碰任何 WebView 挂起/暂停 API。
     // D28: 图片类走桥请求按 imageWeight 占槽位——它响应体大、分块回调多、
@@ -300,7 +309,16 @@ document.close();
     final gateWeight = _isImageRequest(options)
         ? WebViewBridgeGate.imageWeight
         : 1;
-    await WebViewBridgeGate.instance.acquire(weight: gateWeight);
+    // D31: 排队等待按类别归因——把「这次在闸门外等了多久」记到本请求的类别上。
+    // 回调在闸门放行时同步触发（就在 acquire 的 Future 完成之前），
+    // 因此这里捕获的 requestClass 一定是本请求自己的类别。
+    final gate = WebViewBridgeGate.instance;
+    gate.onQueueWait = (int waitedMs) =>
+        _recordClassQueueWait(requestClass, waitedMs);
+    await gate.acquire(weight: gateWeight);
+    // D31: 归因回调只服务于「本请求排队」这一件事，用完立刻摘掉，
+    // 避免它在下一次别的请求排队时被误触发。
+    gate.onQueueWait = null;
     // D12: 活跃期并发/耗时探针（只计数，不改行为）。
     WebViewBridgeProbe.instance.onRequestStart();
 
@@ -326,7 +344,7 @@ document.close();
       final url = options.uri.toString();
       final method = options.method.toUpperCase();
       final requestId = (++_requestId).toString();
-      final requestUri = Uri.parse(url);
+      // D31: requestUri 已在 fetch 开头算过（排队归因需要），此处复用。
       final baseUri = Uri.parse(AppConstants.baseUrl);
       final shouldSyncAppCookies = _shouldSyncAppCookies(requestUri, baseUri);
       final cookieMode = _resolveCookieMode(options, shouldSyncAppCookies);
@@ -346,12 +364,7 @@ document.close();
 
       // D1: 桥开销归因。仅整数累加，不发散存储、不写日志，激活态开销可忽略。
       final bridgeStats = WebViewBridgeDiagnostics.instance;
-      // D26: 记录本条请求的类别，供结束时把桥内耗时归到对应类别。
-      final requestClass = _recordBridgeRequestKind(
-        options,
-        requestUri,
-        method,
-      );
+      // D26: 请求类别已在 fetch 开头确定（D31 排队归因需要），此处不再重复分类。
 
       if (prepareAppCookies) {
         // v0.4.0: 取代 RawSetCookieQueue.flush + _repair + _syncCookiesFromJar
@@ -722,6 +735,32 @@ document.close();
         stats.apiWriteMs += ms;
       case _BridgeRequestClass.other:
         stats.otherMs += ms;
+    }
+  }
+
+  /// D31: 把一条走桥请求在**闸门外排队**的时长累加到它的类别上。
+  ///
+  /// 与 [_recordClassTime] 的区别：后者记的是「进桥之后花了多久」，本方法记的是
+  /// 「因为闸门满而在 Dart 侧等了多久」。两者相加才是这条请求端到端的桥代价。
+  /// 动机（2026-10-13 深夜重定位：活跃刷帖时发热）：D20/D21/D22 只能给出
+  /// **整体**排队占比与饱和度，无法回答「排队代价压在图片上还是 API 上」——
+  /// 而这两者的优化手段完全不同（图片→继续分流原生；API 读→合并调用/降条数）。
+  ///
+  /// 纯整数累加，零采样、零新增运行时开销；不记录 URL / Headers / 正文。
+  void _recordClassQueueWait(_BridgeRequestClass cls, int ms) {
+    if (ms <= 0) return;
+    final stats = WebViewBridgeDiagnostics.instance;
+    switch (cls) {
+      case _BridgeRequestClass.imageSameOrigin:
+        stats.imageSameOriginQueueMs += ms;
+      case _BridgeRequestClass.imageOther:
+        stats.imageOtherQueueMs += ms;
+      case _BridgeRequestClass.apiGet:
+        stats.apiGetQueueMs += ms;
+      case _BridgeRequestClass.apiWrite:
+        stats.apiWriteQueueMs += ms;
+      case _BridgeRequestClass.other:
+        stats.otherQueueMs += ms;
     }
   }
 

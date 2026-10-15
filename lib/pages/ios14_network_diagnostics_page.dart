@@ -258,6 +258,15 @@ class _Ios14NetworkDiagnosticsPageState
           WebViewAdapterSettingsService.instance.gateMaxConcurrent,
       'gateWeightedAcquires': _gate.weightedAcquires,
       'gateInFlight': _gate.inFlight,
+      'gateQueuedWeighted': _gate.queuedWeighted,
+      'gateWaiting': _gate.waiting,
+      'queueAttributionVerdict': s.queueAttributionVerdict,
+      'queueTotalMs': s.totalQueueMs,
+      'imageSameOriginQueueMs': s.imageSameOriginQueueMs,
+      'imageOtherQueueMs': s.imageOtherQueueMs,
+      'apiGetQueueMs': s.apiGetQueueMs,
+      'apiWriteQueueMs': s.apiWriteQueueMs,
+      'otherQueueMs': s.otherQueueMs,
       'avgActiveConcurrency':
           WebViewBridgeProbe.instance.averageActiveConcurrency,
       'activeSampledMs': WebViewBridgeProbe.instance.activeSampledMs,
@@ -599,6 +608,15 @@ class _Ios14NetworkDiagnosticsPageState
             '图片加权入桥（D28）：${_gate.weightedAcquires} 次'
             '（图片按权重 ${WebViewBridgeGate.imageWeight} 占槽位，'
             '在飞数已是权重和）',
+          ),
+          Text(
+            '槽位等待量（D31）：${_gate.queuedWeighted}（= 排队请求的权重之和，'
+            '与「累计排队 ${_gate.queuedTotal} 次」同量纲对比可看出'
+            '排队里大图占多少）',
+          ),
+          Text(
+            '排队耗时归因（D31）：${_bridge.queueAttributionVerdict}',
+            style: const TextStyle(fontWeight: FontWeight.bold),
           ),
           const Text(
             '判读：累计排队明显 > 0 且平均在飞时长下降 → 限流生效，'

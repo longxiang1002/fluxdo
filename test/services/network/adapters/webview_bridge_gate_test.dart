@@ -148,4 +148,64 @@ void main() {
       expect(gate.queuedTotal, 3, reason: '3 个请求真实排队过');
     });
   });
+
+  group('D31 排队等待归因', () {
+    test('排队请求结算等待时长并按权重累加槽位等待量', () async {
+      final gate = WebViewBridgeGate(maxConcurrent: 2);
+      final waits = <int>[];
+      gate.onQueueWait = waits.add;
+
+      // 占满 2 个槽位。
+      await gate.acquire(weight: 1);
+      await gate.acquire(weight: 1);
+      expect(gate.inFlight, 2);
+      expect(gate.waiting, 0);
+
+      // 图片(权重2)进不来 → 排队；槽位等待量按权重 2 累加。
+      var imageDone = false;
+      final fImage = gate.acquire(weight: 2).then((_) => imageDone = true);
+      expect(gate.waiting, 1);
+      expect(gate.queuedTotal, 1);
+      expect(gate.queuedWeighted, 2);
+      expect(imageDone, isFalse);
+      expect(waits, isEmpty, reason: '尚未放行，不该结算等待');
+
+      // 释放一个槽位仍放不下权重 2 → 继续等待，不结算。
+      gate.release(weight: 1);
+      expect(gate.waiting, 1);
+      expect(waits, isEmpty);
+
+      // 再释放一个槽位 → 放行图片，结算一次等待。
+      gate.release(weight: 1);
+      await fImage;
+      expect(gate.waiting, 0);
+      expect(gate.inFlight, 2);
+      expect(waits.length, 1, reason: '放行时结算一次排队时长');
+      expect(waits.single, greaterThanOrEqualTo(0));
+
+      gate.release(weight: 2);
+      expect(gate.inFlight, 0);
+      gate.resetAllForTest();
+      gate.onQueueWait = null;
+    });
+
+    test('未排队请求不产生等待归因，reset 清空槽位等待量', () async {
+      final gate = WebViewBridgeGate(maxConcurrent: 4);
+      var calls = 0;
+      gate.onQueueWait = (_) => calls++;
+
+      await gate.acquire(weight: 1);
+      await gate.acquire(weight: 2);
+      expect(calls, 0, reason: '直接放行不排队，零归因');
+      expect(gate.queuedWeighted, 0);
+
+      gate.release(weight: 1);
+      gate.release(weight: 2);
+      gate.reset();
+      expect(gate.queuedWeighted, 0);
+      expect(gate.queuedTotal, 0);
+      gate.resetAllForTest();
+      gate.onQueueWait = null;
+    });
+  });
 }

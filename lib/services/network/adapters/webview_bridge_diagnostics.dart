@@ -725,6 +725,78 @@ class WebViewBridgeDiagnostics {
   int get totalClassifiedMs =>
       imageSameOriginMs + imageOtherMs + apiGetMs + apiWriteMs + otherMs;
 
+  /// D31: 各类别**闸门外排队**耗时累计（毫秒），与 [totalClassifiedMs] 配对。
+  ///
+  /// 动机（2026-10-13 深夜重定位：活跃刷帖时发热）：[totalClassifiedMs] 记的是
+  /// 「进桥之后」的耗时，但 D22 下调并发上限后，代价会被**前置**到 Dart 侧排队上。
+  /// 只看进桥耗时，会误判「限流让桥更轻了」而忽略「请求只是挪到门外等」。
+  /// 把排队耗时也按类别归因，才能判断限流到底把代价压在了哪一类请求上。
+  int imageSameOriginQueueMs = 0;
+  int imageOtherQueueMs = 0;
+  int apiGetQueueMs = 0;
+  int apiWriteQueueMs = 0;
+  int otherQueueMs = 0;
+
+  /// D31: 全部类别的排队耗时之和（毫秒）。
+  int get totalQueueMs =>
+      imageSameOriginQueueMs +
+      imageOtherQueueMs +
+      apiGetQueueMs +
+      apiWriteQueueMs +
+      otherQueueMs;
+
+  /// D31: 「限流代价压在谁身上」——按类别归因闸门外排队耗时，给出可执行靶点。
+  ///
+  /// 动机（2026-10-13 深夜重定位）：D13/D28 的闸门与权重是**纯 Dart 侧排队**，
+  /// 不阻塞 JS，但排队本身仍要付出代价（请求更晚开始、在飞更久、内存驻留更久）。
+  /// D22 只回答「该不该继续下调上限」，本判据回答「下调的代价落在谁头上」：
+  ///   - 代价压在**同源图片**上 → 说明图片权重 2 仍不够狠，下一步继续把图片
+  ///     分流原生栈（D2），而不是再降上限；
+  ///   - 代价压在 **API 读**上 → 说明限流已经开始伤交互请求（帖子列表/详情
+  ///     变慢），应回退上限或改为合并 API 调用；
+  ///   - 排队耗时占比很低 → 限流代价可忽略，可继续按 D22 建议下调上限。
+  ///
+  /// 判据只用已聚合整数，纯派生、零采样、零新增运行时开销。返回 `null`
+  /// 表示样本不足（尚无排队）。
+  String? get queueAttributionVerdict {
+    final total = totalQueueMs;
+    if (total <= 0) return null;
+    final gate = WebViewBridgeGate.instance;
+    final imageMs = imageSameOriginQueueMs + imageOtherQueueMs;
+    final imagePct = (imageMs * 100 / total).round();
+    final apiGetPct = (apiGetQueueMs * 100 / total).round();
+    final apiWritePct = (apiWriteQueueMs * 100 / total).round();
+    final avgWait = gate.queuedTotal == 0 ? 0 : total ~/ gate.queuedTotal;
+
+    if (imagePct >= 50) {
+      return '限流代价归因（D31）：**压在图片上**——闸门外排队 '
+          '$total ms，其中图片 $imageMs ms（$imagePct%），'
+          'API 读 $apiGetQueueMs ms（$apiGetPct%）、写 $apiWriteQueueMs ms'
+          '（$apiWritePct%）；平均每请求等待 $avgWait ms。'
+          '说明图片权重 ${WebViewBridgeGate.imageWeight} 仍不够狠，'
+          '下一步继续把同源图片分流原生栈（D2），而不是再下调上限。';
+    }
+    if (apiGetPct >= 50) {
+      return '限流代价归因（D31）：**压在 API 读上**——闸门外排队 '
+          '$total ms，其中 API 读 $apiGetQueueMs ms（$apiGetPct%），'
+          '图片 $imageMs ms（$imagePct%）；平均每请求等待 $avgWait ms。'
+          '限流已开始伤交互请求（列表/详情变慢），'
+          '下一步应回退并发上限或改为合并 API 调用，而不是继续降上限。';
+    }
+    if (apiWritePct >= 50) {
+      return '限流代价归因（D31）：**压在写请求上**——闸门外排队 '
+          '$total ms，其中写 $apiWriteQueueMs ms（$apiWritePct%）；'
+          '平均每请求等待 $avgWait ms。写请求必须过桥（借浏览器指纹提交），'
+          '排队会直接拖慢点赞/回复等交互，'
+          '下一步优先给写请求更高优先级（插队）或提高上限。';
+    }
+    return '限流代价归因（D31）：**分散**——闸门外排队共 $total ms'
+        '（图片 $imageMs ms/$imagePct%、API 读 $apiGetQueueMs ms/$apiGetPct%、'
+        '写 $apiWriteQueueMs ms/$apiWritePct%），平均每请求等待 $avgWait ms。'
+        '没有单一类别被明显拖累，限流代价可接受，'
+        '可按 D22 建议继续微调上限或推进分流。';
+  }
+
   /// D26: 活跃发热「按请求类别归因」——直接回答「哪一类走桥请求吃掉了桥的
   /// 大部分 CPU 时间」，给出下一步该砍哪一类的可执行靶点。
   ///
@@ -786,6 +858,11 @@ class WebViewBridgeDiagnostics {
     apiGetMs = 0;
     apiWriteMs = 0;
     otherMs = 0;
+    imageSameOriginQueueMs = 0;
+    imageOtherQueueMs = 0;
+    apiGetQueueMs = 0;
+    apiWriteQueueMs = 0;
+    otherQueueMs = 0;
     textResponses = 0;
     textResponseBytes = 0;
     streamResponses = 0;

@@ -94,12 +94,41 @@ class WebViewBridgeGate {
   /// 明显 > 0 且平均在飞时长下降，说明限流生效。
   int queuedTotal = 0;
 
+  /// D31: 累计「因闸门满而在 Dart 侧排队」的**槽位等待量**（= 等待者权重之和）。
+  ///
+  /// 动机（2026-10-13 深夜重定位：活跃刷帖时发热）：
+  /// [queuedTotal] 只回答「有多少条请求排过队」，但活跃期发热是**CPU 时间**
+  /// 问题，而排队造成的 CPU 代价 ≈ 排队请求数 × 它在飞时长。D28 给图片类
+  /// 请求权重 2 之后，「条数」与「代价」已经不同量纲：一张大图排队 300ms
+  /// 与一个 API 排队 300ms 对 CPU 的影响并不相同。
+  ///
+  /// 本计数器把等待者按**权重**累加（图片 +2、其它 +1），与 [_inFlight]
+  /// 同一量纲，便于诊断页回答「限流到底把多少槽位时间挪到了等待上」。
+  /// 纯整数累加，零采样、零新增运行时开销。
+  int queuedWeighted = 0;
+
   int _waiting = 0;
   final List<Completer<void>> _waiters = <Completer<void>>[];
 
   /// 与 [_waiters] 一一对应的权重队列（D28）：等待者被转交名额时，
   /// 需要按它自己的权重计入 [_inFlight]。
   final List<int> _waiterWeights = <int>[];
+
+  /// D31: 与 [_waiters] 一一对应的「入队时刻」队列。
+  ///
+  /// 用于在请求真正进入桥时算出**这次排队等了多久**，并把它按请求类别
+  /// 归因（见 [onQueueWait]）。只存 1 个 Stopwatch 引用/等待者，不存
+  /// URL、Headers 或正文；空闲期无等待者即无任何对象，零常驻开销。
+  final List<Stopwatch> _waiterWatches = <Stopwatch>[];
+
+  /// D31: 排队等待结束（请求即将进入桥）时的回调，参数为等待毫秒数。
+  ///
+  /// 由调用方（桥适配器）设置，用来把「排队时间」按请求类别归因。
+  /// 设为 null 即关闭归因，闸门本身不依赖它，也不因它抛错而中断放行。
+  void Function(int waitedMs)? onQueueWait;
+
+  /// D31: 当前正在等待进入桥的请求数（只读，供诊断页展示）。
+  int get waiting => _waiting;
 
   /// 申请一个桥名额。返回的 Future 完成时即表示可以进入桥。
   ///
@@ -124,10 +153,29 @@ class WebViewBridgeGate {
       peakWaiting = _waiting;
     }
     queuedTotal++;
+    // D31: 与条数分开累加「槽位等待量」，供诊断页衡量限流的真实代价。
+    queuedWeighted += w;
     final completer = Completer<void>();
     _waiters.add(completer);
     _waiterWeights.add(w);
+    _waiterWatches.add(Stopwatch()..start());
     return completer.future;
+  }
+
+  /// D31: 结算一次排队等待：停表、回调等待毫秒数。
+  ///
+  /// 只在「确实排过队」的请求上调用（即 [acquire] 返回的 Future 曾被挂起）。
+  /// 回调异常被吞掉，绝不影响名额放行。
+  void _settleQueueWait(Stopwatch? watch) {
+    if (watch == null) return;
+    watch.stop();
+    final cb = onQueueWait;
+    if (cb == null) return;
+    try {
+      cb(watch.elapsedMilliseconds);
+    } catch (_) {
+      // 归因失败不影响桥行为。
+    }
   }
 
   /// 释放一个桥名额，并按 FIFO 唤醒能放下的队首等待者。
@@ -148,9 +196,12 @@ class WebViewBridgeGate {
       if (_inFlight + nextWeight > _maxConcurrent) break;
       final next = _waiters.removeAt(0);
       _waiterWeights.removeAt(0);
+      final nextWatch = _waiterWatches.removeAt(0);
       _waiting--;
       _inFlight += nextWeight;
       if (nextWeight > 1) weightedAcquires++;
+      // D31: 先结算排队时长（归因），再放行——保证归因在请求真正开始前完成。
+      _settleQueueWait(nextWatch);
       if (!next.isCompleted) {
         next.complete();
       }
@@ -163,6 +214,7 @@ class WebViewBridgeGate {
   void reset() {
     peakWaiting = 0;
     queuedTotal = 0;
+    queuedWeighted = 0;
     weightedAcquires = 0;
   }
 
@@ -173,6 +225,7 @@ class WebViewBridgeGate {
     _waiting = 0;
     peakWaiting = 0;
     queuedTotal = 0;
+    queuedWeighted = 0;
     weightedAcquires = 0;
     for (final w in _waiters) {
       if (!w.isCompleted) {
@@ -181,5 +234,6 @@ class WebViewBridgeGate {
     }
     _waiters.clear();
     _waiterWeights.clear();
+    _waiterWatches.clear();
   }
 }
