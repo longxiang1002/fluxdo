@@ -2300,3 +2300,42 @@ push `98f27565` + `483a18f1`（`APP_VERSION_SUFFIX` 017→**018**）→ **#60**�
 - 下一步：老板恢复 Actions 后 dispatch 出 D19~D30 各包；实机刷帖看 D26 类别归因 +
   D28 图片加权入桥定位活跃发热靶点（图片主导→压同源图桥负载；API 读主导→D3 桥内降
   开销）。SS 接管内置浏览器方向（P1 iOS14 管道替代）下轮交替。
+
+## 2026-10-15 23:00 CST — D31 闸门排队代价按类别归因（CI 冻结第 12 轮）
+- 前置核对：#78 `a4f8ac9c` success（Release ios14-test-78 已出）；#77/#76 success；
+  无遗留 failure、无缺 Release。Actions 仍账号级冻结：本轮 dispatch 仍 422
+  （"Actions has been disabled for this repository."），runs total 恒 78。
+- 本轮改动（D31，纯 Dart 侧计数与派生判据，不碰 WebView 挂起/暂停 API，不阻塞 JS）：
+  - `webview_bridge_gate.dart`：新增 `queuedWeighted`（排队请求**权重之和**，
+    与 `queuedTotal` 条数口径分离，同 `_inFlight` 量纲）、`waiting` 只读 getter、
+    `onQueueWait` 回调 + `_waiterWatches` 逐等待者 Stopwatch（只存表引用，
+    不存 URL/Headers/正文），放行时 `_settleQueueWait` 结算排队毫秒并回调；
+    `reset`/`resetAllForTest` 同步清理新字段。
+  - `webview_http_adapter.dart`：把 D26 的请求分类**前移到 fetch 开头**
+    （`requestUri` 复用、去掉重复分类），使排队归因能拿到本请求类别；
+    acquire 前挂 `onQueueWait`→`_recordClassQueueWait(requestClass, ms)`，
+    acquire 返回后立即摘回调（避免被下一个排队请求误触发）；新增
+    `_recordClassQueueWait` 按类别累加排队耗时。
+  - `webview_bridge_diagnostics.dart`：新增 5 个 `*QueueMs` 计数 + `totalQueueMs`
+    + `queueAttributionVerdict`（判「限流代价压在图片/API读/写/分散」，
+    并给出对应下一步：图片→继续分流原生；API读→回退上限或合并调用；
+    写→插队/提高上限）；`reset` 同步清空。
+  - `ios14_network_diagnostics_page.dart`：闸门区展示「槽位等待量(D31)」与
+    「排队耗时归因(D31)」；报告 map 加 8 个字段。
+  - `webview_bridge_gate_test.dart`：新增 D31 两例（权重 2 排队结算 + 未排队零归因/reset）。
+  - `ios14-test.yml`：APP_VERSION_SUFFIX 043→**044**。
+- 本地验证：
+  - dart format（CI 同款 Dart 3.12.0）5 文件 **0 changed，exit 0** ✅
+    （首次 1 changed 已就地格式化后复跑通过）。
+  - `flutter test` gate + probe 两文件 **15/15 通过** ✅（含新增 D31 两例）。
+  - `dart analyze --fatal-infos`：gate 文件 **No issues found** ✅；
+    diagnostics 与 gate_test 的 5 info / 1 warning 经 `git stash` 对照确认
+    **改动前即存在**（非本轮引入），且不在 CI 的 `changed-dart.txt` 范围内
+    （CI 基线为 `e1bd839e`，该两文件是更早轮次已入基线的改动）。
+    http_adapter / diagnostics_page 的 analyzer 在本机 OOM 崩溃（3.7G 内存），
+    已用 stash 对照确认**基线同样崩溃**，非本轮引入。
+- commit `d01b2a2e`；push 成功（`d429598f..d01b2a2e`）；dispatch 422，无新 run 无包。
+- 下一步：老板恢复 Actions 后 dispatch 出 D19~D31 各包（044）；实机刷帖读诊断页
+  「类别耗时归因(D26)」+「排队耗时归因(D31)」——两者交叉即可判定靶点：
+  D26 说图片主导且 D31 排队也压图片 → 图片权重/分流继续加码；D26 说 API 读主导
+  → 走 D3 桥内降开销或合并调用。SS 接管内置浏览器方向下轮交替。

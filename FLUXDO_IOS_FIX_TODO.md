@@ -301,3 +301,25 @@ push `16c4b3d2` 成功（origin 已同步）；dispatch 与 push 触发均被账
 1. 老板恢复 GitHub Actions 后 dispatch 出 D26(041)+D28(042) 包。
 2. 实机刷帖读诊断页「类别耗时归因(D26)」+「图片加权入桥(D28)」定靶点。
 3. SS 接管内置浏览器方向下轮交替推进。
+
+## D31（2026-10-15 23:00 CST）— 闸门排队代价按请求类别归因（CI 冻结第 12 轮）
+### 完成
+- [x] 核对 CI：#78/#77/#76 success，无遗留 failure、无缺 Release；Actions 仍冻结（dispatch 422，runs 恒 78）。
+- [x] **D31 改动**（纯 Dart 计数/派生判据，零 WebView 挂起/暂停 API、不阻塞 JS）：
+      `webview_bridge_gate.dart` 新增 `queuedWeighted`（排队权重和）/`waiting`/
+      `onQueueWait`/`_waiterWatches`/`_settleQueueWait`；`webview_http_adapter.dart`
+      把 D26 分类前移到 fetch 开头（requestUri 复用）并在 acquire 前后挂/摘排队归因回调，
+      新增 `_recordClassQueueWait`；`webview_bridge_diagnostics.dart` 新增 5 个
+      `*QueueMs` + `totalQueueMs` + `queueAttributionVerdict`；诊断页展示槽位等待量 +
+      排队耗时归因 + 报告 8 字段；gate 单测新增 D31 两例；`ios14-test.yml` 后缀 043→044。
+- [x] 本地验证：dart format（CI 同款 3.12.0）5 文件 0 changed exit 0；flutter test
+      gate+probe **15/15 通过**；`dart analyze --fatal-infos` gate 文件 No issues found
+      （其余 info/warning 经 stash 对照确认改动前即存在、且不在 CI changed 范围内）。
+- [x] commit `d01b2a2e`，push 成功。
+### 未完成
+- Actions 账号级冻结（dispatch 422），无新 run、无新包。
+### 下一步
+1. 老板恢复 GitHub Actions 后 dispatch 出 D19~D31 各包（`0.2.28.044`）。
+2. 实机刷帖交叉读 D26「类别耗时归因」与 D31「排队耗时归因」定靶：
+   两者同指图片 → 图片分流/权重继续加码；D26 指 API 读 → 走 D3 桥内降开销或合并调用。
+3. SS 接管内置浏览器（P1 iOS14 管道替代）方向下轮交替推进。
