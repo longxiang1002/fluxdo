@@ -2267,3 +2267,36 @@ push `98f27565` + `483a18f1`（`APP_VERSION_SUFFIX` 017→**018**）→ **#60**�
 - commit `16c4b3d2`；push 成功（origin 已同步）；无 run（账号级冻结）。
 - 下一步：老板恢复 Actions 后出 D28 包（0.2.28.042）；实机刷帖看「图片加权入桥
   次数」与发热变化，不明显则转 D26 类别归因定靶点。SS 方向下轮交替。
+
+## 2026-10-15 19:24 CST — D29 核对+清障+队列预检（CI 冻结第 10 轮，验证轮）
+- 前置核对：#78 `a4f8ac9c` success（Release ios14-test-78 已出）；#77/#76 success；无遗留
+  failure、无缺 Release。Actions 仍冻结（dispatch 422、push 不触发），runs total 恒 78。
+- 本轮新发现（关键）：core/doh_proxy 子模块工作区出现 ` M src/proxy.rs`（连接池改造）。
+  逐行对比确认它与 patches/0001-gateway-share-upstream-h2-pool.patch 是**同一份改动**的重复
+  残留——连接池共享 + h1/h2 自适应早已以 patch 形式 vendor 在本仓库（CI 第 40-53 行 checkout
+  后自动应用），工作区那份是旧应用留下的副本。已用本地 Rust 1.99 cargo check 验证该改动可编译
+  （exit 0、无 warning），确认 vendor 版本正确后清理了子模块脏区（git checkout -- 还原，未动
+  commit、未改父指针）。结论：**路径 B（DoH 网关上游连接复用降热）已在交付队列里**，无需新改。
+- 队列预检（本轮实际成果）：对比 #78 的 HEAD `a4f8ac9c` 到当前 HEAD `8d7e6f37` 的 8 个 Dart
+  文件（D26/D27/D28 改动），用 CI 同款 Dart 3.12.0 跑 `dart format --set-exit-if-changed` →
+  **0 changed exit 0** ✅；用本地 Flutter 跑 webview_bridge_gate_test.dart → **7/7 通过** ✅。
+  即：下一次 CI 恢复后出包，step7（格式）与闸门单测不会再挂，D26/D28 可顺利出包。
+- 未新增代码 commit（本轮为验证/清障轮，无新变更可推）；因 Actions 冻结无新 run 无新包。
+- 下一步：老板恢复 GitHub Actions 后重跑 dispatch 出 D26(041)+D28(042) 包；实机刷帖看诊断页
+  「类别耗时归因(D26)」+「图片加权入桥(D28)」定位活跃发热靶点；SS 接管内置浏览器方向下轮交替。
+
+## 2026-10-15 21:00 CST — D30 加权闸门交错场景单测（CI 冻结第 11 轮，活跃负载账本锁定）
+- 前置核对：#78 `a4f8ac9c` success（Release ios14-test-78 已出）；#77/#76 success；
+  无遗留 failure、无缺 Release。Actions 仍账号级冻结（dispatch 422，runs total 恒 78）。
+- 本轮改动（D30，纯测试，零运行时开销，不碰 WebView 挂起/暂停 API）：
+  - `test/services/network/adapters/webview_bridge_gate_test.dart` 新增 D30 单测：
+    上限 3，进「图(2)+API(1)+图(2)+API(1)+API(1)」，逐步释放逐步校验——inFlight 全程
+    0~3 不越界、队首大图放不下时不做部分放行(FIFO)、释放大图后唤醒图+API、
+    weightedAcquires=图片条数、全部释放后账本归零。锁定「轻量 API 不被队首大图
+    饿死、D28 权重账本交错自洽」。
+  - `ios14-test.yml`：APP_VERSION_SUFFIX 042→043。
+- 本地验证：dart format（CI 同款 3.12.0）0 changed exit 0 ✅；flutter test gate → 8/8 通过 ✅。
+- commit `3f83eab6`；push 成功；dispatch 422（Actions 冻结）无 run 无包。
+- 下一步：老板恢复 Actions 后 dispatch 出 D19~D30 各包；实机刷帖看 D26 类别归因 +
+  D28 图片加权入桥定位活跃发热靶点（图片主导→压同源图桥负载；API 读主导→D3 桥内降
+  开销）。SS 接管内置浏览器方向（P1 iOS14 管道替代）下轮交替。

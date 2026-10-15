@@ -4,6 +4,45 @@
 > **2026-10-13 起主攻**：DoH 模式下 App 仍旧发热（症状=**活跃刷帖时**发热，非空闲）。
 
 
+## 🎯 本轮（2026-10-15 21:00 CST）— D30：加权闸门交错场景单测（活跃混合负载账本锁定）
+
+### CI 前置核对（强制第 0 步）
+- **#78** `a4f8ac9c` = ✅ success（Release **ios14-test-78** / 0.2.28.032 已出）。
+- **#77** `affbc514` = ✅ success；**#76** `a47bc69c` = ✅ success。
+- → 无未修复 failure、无缺 Release。
+- ⚠️ **Actions 仍账号级冻结**：本轮实测 dispatch 再返 **HTTP 422**
+  `Actions has been disabled for this repository.`；push 兜底也不触发（runs total
+  恒停在 78）。D19/D20/D21/D26/D28 均已 push 但无 run，只差 CI 出包验证。
+
+### 本轮改动（D30，commit `3f83eab6`）
+**动机（活跃负载发热主线）**：D28 给图片类走桥请求加了权重（=2）占槽位，但
+现有单测只覆盖「单图排队→单图转交」，没覆盖活跃刷帖的真实形态——**图片与 API
+交错进入、按不同权重抢同一批槽位**。缺一个本地可复现的账本自洽测试，就无法在
+CI 冻结期验证 D28 权重逻辑在交错场景下不会计数漂移或饿死轻量请求。
+
+**改动（纯测试，零运行时开销，不碰 WebView 挂起/暂停 API）**：
+- `test/services/network/adapters/webview_bridge_gate_test.dart`：新增 D30 单测
+  ——上限 3，进「图(2)+API(1)+图(2)+API(1)+API(1)」；逐步释放、逐步校验：
+  （a）inFlight 全程 0~3 不越界；（b）队首大图放不下时不做部分放行（FIFO 语义）；
+  （c）释放大图后按 FIFO 唤醒图+API；（d）weightedAcquires=图片条数；
+  （e）所有令牌释放后 inFlight 归零。锁定「不饿死轻量 API、账本自洽」。
+- `.github/workflows/ios14-test.yml`：APP_VERSION_SUFFIX 042→**043**。
+
+### 本地验证（CI 同款 Dart 3.12.0）
+- `dart format --set-exit-if-changed`：**0 changed exit 0** ✅
+- 本地 Flutter `flutter test webview_bridge_gate_test.dart` → **8/8 通过** ✅（含 D30）
+
+### CI
+push `3f83eab6` 成功；dispatch 422（Actions 冻结），无 run 无包。
+
+### 下一步
+1. 老板网页端恢复 GitHub Actions（账号级设置）→ 重跑 dispatch 出 D19~D30 各包
+   （0.2.28.033~043），step7（格式）与闸门单测已本地全绿，不会再挂。
+2. 实机刷帖看诊断页「类别耗时归因(D26)」+「图片加权入桥(D28)」定位活跃发热靶点；
+   若图片仍主导 → 继续压同源图片桥负载；若 API 读主导 → 走 D3 桥内降开销。
+3. SS 接管内置浏览器方向（P1 iOS14 管道替代）与主线下轮交替推进。
+
+
 ## 🎯 本轮（2026-10-15 11:00 CST）— D21：闸门饱和度归因（活跃并发量化）
 
 ### CI 前置核对（强制第 0 步）
@@ -245,4 +284,20 @@ push `16c4b3d2` 成功（origin 已同步）；dispatch 与 push 触发均被账
 1. 老板恢复 GitHub Actions 后，dispatch 或 push 均可出 D28 包（`0.2.28.042`）。
 2. 实机刷帖：看诊断页「图片加权入桥次数」是否随滚动增长，对比发热是否下降；
    若下降不明显，说明图片非主导，转看 D26 类别耗时归因定靶点。
+3. SS 接管内置浏览器方向下轮交替推进。
+
+## D29（2026-10-15 19:24 CST）— 核对+清障+队列预检（CI 冻结第 10 轮，验证轮）
+### 完成
+- [x] 核对 CI：#78/#77/#76 success，无遗留 failure、无缺 Release；Actions 仍冻结（runs 恒 78）。
+- [x] **清障**：core/doh_proxy 工作区脏改动 `src/proxy.rs` 经逐行比对，确认是与
+      patches/0001-gateway-share-upstream-h2-pool.patch **同内容**的重复残留（连接池共享+h1/h2
+      自适应早已 vendor 于本仓库）；用本地 Rust cargo check 验证可编译后，清理子模块脏区还原。
+      → 结论：路径 B（DoH 网关上游连接复用降热）已在交付队列，无需新改。
+- [x] **队列预检**：#78 HEAD `a4f8ac9c`→HEAD `8d7e6f37` 的 8 个 Dart 文件（D26/D27/D28），
+      CI 同款 Dart 3.12.0 format → 0 changed exit 0；flutter gate test → 7/7 通过。
+### 未完成
+- 无新代码 commit 可推（本轮为验证/清障轮）；Actions 冻结，无新 run 无新包。
+### 下一步
+1. 老板恢复 GitHub Actions 后 dispatch 出 D26(041)+D28(042) 包。
+2. 实机刷帖读诊断页「类别耗时归因(D26)」+「图片加权入桥(D28)」定靶点。
 3. SS 接管内置浏览器方向下轮交替推进。
