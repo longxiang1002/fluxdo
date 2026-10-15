@@ -185,3 +185,64 @@ push `31c283fe`；dispatch 被 422 拒（Actions 禁用），无 run。
 - [x] commit `a74d4eef` + push（origin 已同步）
 - [ ] ⛔ CI 出包（0.2.28.040）——Actions 账号级禁用，连续第 7 轮阻断
 - [ ] 实机：某路径图片 403/变糊时，把该路径片段加入豁免名单即时验证
+
+## D26 接线补完（2026-10-15 17:00 CST）— 类别耗时归因从「有壳无数」补成可读事实
+- [x] 核对 CI：#78 `a4f8ac9c` success（Release ios14-test-78 / 0.2.28.032 已出）；
+      #77/#76 success，无遗留 failure；Actions 仍禁用（本轮 dispatch 再返 422）
+- [x] 读现状：发现上轮 D27 提交时把 D26 诊断侧（5 个 `*Ms` 字段 +
+      `classTimeVerdict` + 诊断页）带进 HEAD，但 adapter 侧接线漏提交 →
+      `_recordClassTime` 从未被调用、`classTimeVerdict` 恒为 null，D26 是半成品
+- [x] `webview_http_adapter.dart`：`_recordBridgeRequestKind` 返回
+      `_BridgeRequestClass`；新增 `_recordClassTime`；文本路径(:632)与流路径(:960)
+      各归因一次；`_fetchBinaryStreamResponse` 透传 `requestClass`；新增枚举
+- [x] `ios14-test.yml`：APP_VERSION_SUFFIX 040→**041**
+- [x] dart format（CI 同款 3.12.0）1 文件 **0 changed exit 0** ✅
+- [x] commit `32b4953b` + push（origin 已同步）
+- [ ] ⛔ CI 出包（0.2.28.041）——Actions 账号级禁用，连续第 8 轮阻断
+- [ ] 实机：刷帖一轮看 D26 结论行，判主导类别（图片/API读/写）定下一步靶点
+
+## D28（2026-10-15 18:00 CST）— 桥并发闸门按类别加权（图片权重 2）
+### CI 前置核对（强制第 0 步）
+- **#78** `a4f8ac9c` = ✅ success，全 15 步绿；Release **`ios14-test-78`** 已出
+  （`0.2.28.032`，含 IPA）✅。**#77/#76** = ✅ success，均有 Release。
+- **#75** `84ab8ca6` = ❌ failure，但已被 #76/#77/#78 覆盖修复，无需回修。
+- → 无未修复 failure、无缺 Release。
+- ⚠️ **Actions 仍被账号级禁用**：`GET /actions/permissions` 报 `enabled:true`、
+  workflow `state:active`，但 dispatch 实测再返 HTTP 422
+  `Actions has been disabled for this repository.`（连续第 9 轮）。
+- **本轮新验证**：为绕开被禁的 dispatch API，给 workflow 加 `push` 兜底触发器
+  （限本分支 + paths-ignore 自身），push `16c4b3d2` 后**仍无新 run**
+  （runs total 停在 78）→ 证实账号级冻结同时挡住 push 触发，非代码层可解。
+
+### 本轮改动（D28，commit `16c4b3d2`）
+**证据（先读代码定位）**：D13 桥并发闸门让所有走桥请求按同一权重抢槽位，但
+图片流（响应体大、分块回调多、在飞时间长）与 API/文本请求（体小、回传快）
+单位成本不同。活跃滚动时少量大图即长期占住名额，把大量轻量请求挤入队列，
+拉长整体在飞时间、抬高 CPU 峰值——正对「活跃刷帖发热」病灶。
+
+**改动（纯 Dart 侧排队，不碰任何 WebView 挂起/暂停 API，不阻塞 JS）**：
+- `webview_bridge_gate.dart`：`acquire`/`release` 支持 `weight`；`_inFlight`
+  改为**权重和**；`release` 改为「先扣减释放者权重，再循环唤醒能放下的队首」
+  （修正旧实现「名额转交、_inFlight 不变」在权重>1 时的计数漂移）；
+  新增 `imageWeight=2`、`weightedAcquires` 计数；`reset`/`resetAllForTest`
+  同步清理 `_waiterWeights`。
+- `webview_http_adapter.dart`：新增 `_isImageRequest`；图片类请求
+  acquire/release 传 `weight=imageWeight`，其余默认 1（向后兼容）。
+- `ios14_network_diagnostics_page.dart`：闸门区展示「图片加权入桥次数」；
+  报告 map 加 `gateWeightedAcquires`/`gateInFlight`。
+- `webview_bridge_gate_test.dart`：新增 D28 加权占用 + 向后兼容两例。
+- `ios14-test.yml`：APP_VERSION_SUFFIX 041→**042**；加 push 兜底触发器。
+
+### 本地验证（CI 同款 Dart 3.12.0）
+- `dart format --set-exit-if-changed`：4 文件 **0 changed，exit 0** ✅。
+- `flutter test webview_bridge_gate_test.dart`：**7/7 通过** ✅。
+
+### CI
+push `16c4b3d2` 成功（origin 已同步）；dispatch 与 push 触发均被账号级冻结挡住，
+无新 run、无出包。
+
+### 下一步
+1. 老板恢复 GitHub Actions 后，dispatch 或 push 均可出 D28 包（`0.2.28.042`）。
+2. 实机刷帖：看诊断页「图片加权入桥次数」是否随滚动增长，对比发热是否下降；
+   若下降不明显，说明图片非主导，转看 D26 类别耗时归因定靶点。
+3. SS 接管内置浏览器方向下轮交替推进。

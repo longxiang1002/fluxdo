@@ -2221,3 +2221,49 @@ push `98f27565` + `483a18f1`（`APP_VERSION_SUFFIX` 017→**018**）→ **#60**�
 - 下一步：老板恢复 Actions 后重跑 dispatch 出 D27 包（0.2.28.040）；实机刷帖若见
   某路径图片 403/变糊，在诊断页把该路径片段加入豁免名单即时验证，不必整体关分流。
   SS 接管内置浏览器方向下轮交替推进。
+
+## 2026-10-15 17:00 CST — D26 类别耗时归因接线（阻断未解，第 8 轮）
+- 前置核对：#78 `a4f8ac9c` success（Release ios14-test-78 / 0.2.28.032 已出）；
+  #77/#76 success，无遗留 failure；**Actions 仍禁用**（本轮 dispatch 实测再返
+  HTTP 422「Actions has been disabled for this repository」）。D19–D27+D26 共
+  10 个 commit 均无对应 run、出不了包。
+- 本轮判断：上轮（D27 `a74d4eef`）提交时把 D26 的**诊断侧**（
+  `webview_bridge_diagnostics.dart` 的 5 个 `*Ms` 字段 + `classTimeVerdict` +
+  诊断页展示）一起带进了 HEAD，但 **adapter 侧接线漏提交**——导致
+  `_recordClassTime` 从未被调用、`classTimeVerdict` 恒为 null，D26 是个「有壳无
+  数」的半成品。本轮把它补完整。
+- 改动（零运行时开销、零采样，不碰任何 WebView 挂起/暂停 API，不阻塞 JS）：
+  - `webview_http_adapter.dart`：`_recordBridgeRequestKind` 改为返回
+    `_BridgeRequestClass`（imageSameOrigin/imageOther/apiGet/apiWrite/other）；
+    新增 `_recordClassTime(cls, ms)` 把每请求桥内总耗时归到对应类别；文本路径
+    （:632）与二进制流路径（:960）各调用一次；`_fetchBinaryStreamResponse` 加
+    `required _BridgeRequestClass requestClass` 透传；新增 `_BridgeRequestClass`
+    枚举。
+  - `ios14-test.yml`：APP_VERSION_SUFFIX 040→**041**。
+- 本地：dart format（CI 同款 3.12.0）1 文件 **0 changed exit 0** ✅。
+- commit `32b4953b`；push 成功（origin 已同步）；dispatch 被 422 拒（Actions 禁用）。
+- 下一步：老板恢复 Actions 后重跑 dispatch 出 D26 包（0.2.28.041）；实机刷帖一轮
+  看 D26 结论行——判「图片主导」则继续分流图片；「API 读主导」则减少 API 读走桥
+  条数；「写主导」则降单请求成本。SS 接管内置浏览器方向下轮交替推进。
+
+## 2026-10-15 18:00 CST — D28 桥并发闸门按类别加权（阻断未解，第 9 轮）
+- 前置核对：#78 `a4f8ac9c` success（Release ios14-test-78 / 0.2.28.032 已出）；
+  #77/#76 success；#75 failure 已被覆盖修复。无遗留 failure、无缺 Release。
+- **本轮新验证**：给 workflow 加 push 兜底触发器后 push `16c4b3d2`，runs total
+  仍停在 78、无新 run → 证实账号级 Actions 冻结**同时挡住 push 触发**，
+  dispatch(422) 与 push(不触发) 两条路都断，非代码层可解。
+- 改动（D28，纯 Dart 侧排队，不碰 WebView 挂起/暂停 API，不阻塞 JS）：
+  - `webview_bridge_gate.dart`：acquire/release 支持 weight；_inFlight 改为权重和；
+    release 改为「先扣减释放者权重，再循环唤醒能放下的队首」，修正旧实现
+    「名额转交、_inFlight 不变」在权重>1 时的计数漂移；新增 imageWeight=2、
+    weightedAcquires；reset/resetAllForTest 同步清理 _waiterWeights。
+  - `webview_http_adapter.dart`：新增 _isImageRequest；图片类请求传
+    weight=imageWeight，其余默认 1（向后兼容）。
+  - `ios14_network_diagnostics_page.dart`：展示「图片加权入桥次数」+ 报告两字段。
+  - `webview_bridge_gate_test.dart`：新增 D28 两例。
+  - `ios14-test.yml`：APP_VERSION_SUFFIX 041→042 + push 兜底触发器。
+- 本地：dart format（CI 同款 3.12.0）4 文件 0 changed exit 0 ✅；
+  flutter test gate 7/7 通过 ✅。
+- commit `16c4b3d2`；push 成功（origin 已同步）；无 run（账号级冻结）。
+- 下一步：老板恢复 Actions 后出 D28 包（0.2.28.042）；实机刷帖看「图片加权入桥
+  次数」与发热变化，不明显则转 D26 类别归因定靶点。SS 方向下轮交替。
