@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -19,6 +21,17 @@ class WebViewAdapterSettingsService {
       WebViewAdapterSettingsService._internal();
 
   static const _enabledKey = 'webview_adapter_enabled';
+
+  /// D24：同源图片分流开关的持久化键。
+  ///
+  /// 动机：D19/D22 把两个 A/B 开关做成运行时可选，但只存在内存里——
+  /// 实机刷帖对比发热时若中途重启 App（TrollStore 覆盖装、崩溃、手动杀），
+  /// 开关会静默回落到默认值，A/B 数据就废了。落盘后实验状态可跨重启保持，
+  /// 也便于出包后一次性把结论固化。
+  static const _imageNativeRoutingKey = 'webview_image_native_routing';
+
+  /// D24：桥并发上限的持久化键。
+  static const _gateMaxConcurrentKey = 'webview_gate_max_concurrent';
 
   /// 用户持久化的兼容模式开关。
   ///
@@ -46,8 +59,11 @@ class WebViewAdapterSettingsService {
   bool get imageNativeRoutingEnabled => imageNativeRoutingNotifier.value;
 
   /// 设置同源图片分流开关（诊断页 A/B 试验用，运行时可切换）。
+  ///
+  /// D24：同时落盘，重启后仍保持该实验档位。
   void setImageNativeRouting(bool value) {
     imageNativeRoutingNotifier.value = value;
+    unawaited(_prefs?.setBool(_imageNativeRoutingKey, value));
   }
 
   /// D22：桥并发闸门上限的运行时 A/B 开关（默认 4，与 D13 初值一致）。
@@ -70,10 +86,12 @@ class WebViewAdapterSettingsService {
   /// 设置桥并发上限（诊断页 A/B 试验用，运行时即切即生效）。
   ///
   /// 下限保护为 1：0 会让所有走桥请求永久排队（闸门永不释放名额）。
+  /// D24：同时落盘，重启后仍保持该实验档位。
   void setGateMaxConcurrent(int value) {
     if (value < 1) return;
     gateMaxConcurrentNotifier.value = value;
     WebViewBridgeGate.instance.maxConcurrent = value;
+    unawaited(_prefs?.setInt(_gateMaxConcurrentKey, value));
   }
 
   SharedPreferences? _prefs;
@@ -94,6 +112,14 @@ class WebViewAdapterSettingsService {
     _prefs = prefs;
     notifier.value = prefs.getBool(_enabledKey) ?? false;
     _syncEffectiveEnabled();
+    // D24：恢复上一轮的 A/B 实验档位（未设置过则保持默认 true / 4）。
+    imageNativeRoutingNotifier.value =
+        prefs.getBool(_imageNativeRoutingKey) ?? true;
+    final savedCap = prefs.getInt(_gateMaxConcurrentKey);
+    if (savedCap != null && savedCap >= 1) {
+      gateMaxConcurrentNotifier.value = savedCap;
+      WebViewBridgeGate.instance.maxConcurrent = savedCap;
+    }
   }
 
   Future<void> setEnabled(bool value) async {
@@ -154,5 +180,7 @@ class WebViewAdapterSettingsService {
     notifier.value = false;
     sessionFallbackNotifier.value = false;
     effectiveNotifier.value = false;
+    imageNativeRoutingNotifier.value = true;
+    gateMaxConcurrentNotifier.value = WebViewBridgeGate.defaultMaxConcurrent;
   }
 }
