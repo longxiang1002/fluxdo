@@ -249,6 +249,8 @@ class _Ios14NetworkDiagnosticsPageState
       'binaryBridgeBytes': s.binaryBridgeBytes,
       'binaryBridgeChunks': s.binaryBridgeChunks,
       'classTimeVerdict': s.classTimeVerdict,
+      'perRequestTaxVerdict': s.perRequestTaxVerdict,
+      'averageBridgeCostMs': s.averageBridgeCostMs,
       'imageSameOriginMs': s.imageSameOriginMs,
       'imageOtherMs': s.imageOtherMs,
       'apiGetMs': s.apiGetMs,
@@ -439,6 +441,11 @@ class _Ios14NetworkDiagnosticsPageState
           if (_bridge.classTimeVerdict != null)
             Text(
               '类别耗时归因（D26）：${_bridge.classTimeVerdict}',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          if (_bridge.perRequestTaxVerdict != null)
+            Text(
+              '单请求固定税（D37）：${_bridge.perRequestTaxVerdict}',
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
           Text(

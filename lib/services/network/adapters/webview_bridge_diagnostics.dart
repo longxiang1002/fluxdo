@@ -1072,6 +1072,53 @@ class WebViewBridgeDiagnostics {
         '下一步按占比从高到低依次分流，或整体降并发上限削峰。';
   }
 
+  /// D37: 活跃发热「单请求固定税」——直接回答「活跃刷帖时，桥的每请求
+  /// 固定开销到底有多重」，给出「该不该继续削单请求成本」的可执行判据。
+  ///
+  /// 动机（2026-10-13 深夜重定位）：D35/D36 只回答「桥忙多久」，D26 只回答
+  /// 「哪一类吃时间」，但都**没有把耗时按请求数归一**。若单请求固定税很轻
+  /// （如 <10 ms），那活跃发热就不是「单请求太贵」而是「请求太多」或「桥
+  /// 之外的东西（DoH 出口 / 渲染 / 网络往返）」；若很重（如 >50 ms），
+  /// 削单请求成本（D16/D17/D3）才值得继续投入。这是把「下一步该不该继续
+  /// 削单请求开销」变成可读数字的最后一块拼图。
+  ///
+  /// 口径：[totalMs]（所有走桥请求的桥内总耗时）÷ [totalRequests]（走桥请求数），
+  /// 即**平均每个走桥请求在桥里花掉多少毫秒**。纯派生、零采样、零新增运行时
+  /// 开销；不触碰任何 WebView 挂起/暂停 API。
+  double? get averageBridgeCostMs {
+    if (totalRequests <= 0) return null;
+    return totalMs / totalRequests;
+  }
+
+  /// D37: 单请求固定税速判——回答「活跃发热是否来自单请求桥开销」。
+  ///
+  /// 判据只用已聚合整数，纯派生、零采样、零新增运行时开销。返回 `null`
+  /// 表示样本不足（尚无走桥请求）。
+  String? get perRequestTaxVerdict {
+    if (totalRequests < bridgeCostMinSamples) return null;
+    final avg = averageBridgeCostMs;
+    if (avg == null) return null;
+    final avgMs = avg.round();
+    final head =
+        '单请求固定税（D37）：$totalRequests 条走桥请求共 $totalMs ms，'
+        '平均每条 $avgMs ms。';
+    if (avgMs >= 50) {
+      return '$head **单请求税很重**——每个走桥请求都在付高额固定成本，'
+          '活跃刷帖时这份成本随请求数线性累积，是发热的直接来源；'
+          '下一步继续削单请求开销（D16/D17 三段耗时、D3 避免 base64 回退、'
+          'D10 小体内联），并优先把可分流的请求赶出桥（D2/D19）。';
+    }
+    if (avgMs >= 10) {
+      return '$head **单请求税中等**——桥有固定成本但不算离谱；'
+          '活跃发热更可能是「请求条数多 × 中等成本」的乘积效应，'
+          '下一步优先减少走桥条数（图片分流 D2、只读 API 改原生），'
+          '同时顺手削三段耗时。';
+    }
+    return '$head **单请求税很轻**——桥本身不是活跃发热的主因，'
+        '继续削单请求开销收益有限；下一步应转查桥之外：DoH 出口往返、'
+        '连接复用（路径B）、渲染与解码，或桥外排队/启停抖动。';
+  }
+
   void reset() {
     imageSameOrigin = 0;
     imageOther = 0;

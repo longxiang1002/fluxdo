@@ -365,4 +365,64 @@ void main() {
       expect(stats.endToEndAttributionVerdict, isNull);
     });
   });
+
+  group('D37 单请求固定税', () {
+    test('无样本时均值与判据均为 null', () {
+      expect(stats.averageBridgeCostMs, isNull);
+      expect(stats.perRequestTaxVerdict, isNull);
+    });
+
+    test('样本不足（< bridgeCostMinSamples）时判据为 null，但均值可算', () {
+      stats.imageSameOrigin = 3;
+      stats.totalMs = 300;
+      expect(stats.totalRequests, 3);
+      expect(stats.averageBridgeCostMs, 100);
+      expect(stats.perRequestTaxVerdict, isNull);
+    });
+
+    test('均值 = 总耗时 / 走桥请求数', () {
+      stats.imageSameOrigin = 10;
+      stats.apiGet = 10;
+      stats.totalMs = 400;
+      expect(stats.totalRequests, 20);
+      expect(stats.averageBridgeCostMs, 20);
+    });
+
+    test('均值 >= 50ms → 判为「单请求税很重」，指向削单请求开销', () {
+      stats.imageSameOrigin = 10;
+      stats.totalMs = 600;
+      final verdict = stats.perRequestTaxVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('D37'));
+      expect(verdict, contains('很重'));
+      expect(verdict, contains('D16/D17'));
+    });
+
+    test('均值 10~50ms → 判为「单请求税中等」，指向减少走桥条数', () {
+      stats.imageSameOrigin = 10;
+      stats.totalMs = 200;
+      final verdict = stats.perRequestTaxVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('中等'));
+      expect(verdict, contains('减少走桥条数'));
+    });
+
+    test('均值 < 10ms → 判为「单请求税很轻」，提示转查桥外因素', () {
+      stats.imageSameOrigin = 10;
+      stats.totalMs = 50;
+      final verdict = stats.perRequestTaxVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('很轻'));
+      expect(verdict, contains('桥之外'));
+    });
+
+    test('reset 清零后均值与判据回到 null', () {
+      stats.imageSameOrigin = 10;
+      stats.totalMs = 600;
+      expect(stats.perRequestTaxVerdict, isNotNull);
+      stats.reset();
+      expect(stats.averageBridgeCostMs, isNull);
+      expect(stats.perRequestTaxVerdict, isNull);
+    });
+  });
 }
