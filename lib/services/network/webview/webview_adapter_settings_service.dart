@@ -33,6 +33,14 @@ class WebViewAdapterSettingsService {
   /// D24：桥并发上限的持久化键。
   static const _gateMaxConcurrentKey = 'webview_gate_max_concurrent';
 
+  /// D27：同源图片分流**跳过名单**的持久化键（逗号分隔的路径片段）。
+  ///
+  /// 动机：D2 把同源静态图片整体分流到原生 Dio，但老板实测若某些图片路径
+  /// 分流后出现 CF 403 / 变糊，就得逐条把「这一条路径」拉回走桥，而不是整体
+  /// 关掉分流（整体关掉会把已省下的桥负载全吐回去）。此前只能改代码 + 重出包，
+  /// 这里把名单落盘，诊断页可即时增删，且跨重启保持。
+  static const _imageSkipPathsKey = 'webview_image_skip_paths';
+
   /// 用户持久化的兼容模式开关。
   ///
   /// 设置页只监听这个 notifier，避免把 CF 恢复流程启用的临时兼容模式
@@ -57,6 +65,62 @@ class WebViewAdapterSettingsService {
 
   /// 当前同源图片是否走原生 Dio 直连。
   bool get imageNativeRoutingEnabled => imageNativeRoutingNotifier.value;
+
+  /// D27：同源图片分流时**强制走桥**的路径片段名单（小写，子串匹配）。
+  ///
+  /// 语义：分流开启时，若图片 URL 的 path 含名单中任一片段，则该图片**不**分流，
+  /// 仍走 WebView 桥（即「这条路径疑似被 CF 拦/变糊，单独豁免」）。
+  /// 空名单 = 全部同源图片都分流（D2 原行为）。
+  final ValueNotifier<List<String>> imageSkipPathsNotifier =
+      ValueNotifier<List<String>>(const <String>[]);
+
+  /// D27：名单只读视图。
+  List<String> get imageSkipPaths => imageSkipPathsNotifier.value;
+
+  /// D27：该图片 URL 是否被跳过名单豁免（命中则不走原生分流，回退走桥）。
+  ///
+  /// 纯字符串子串匹配，零采样、零运行时开销；不触碰任何 WebView 挂起/暂停 API。
+  bool isImageRoutingSkipped(Uri uri) {
+    final list = imageSkipPathsNotifier.value;
+    if (list.isEmpty) return false;
+    final path = uri.path.toLowerCase();
+    for (final fragment in list) {
+      if (fragment.isNotEmpty && path.contains(fragment)) return true;
+    }
+    return false;
+  }
+
+  /// D27：新增一条跳过片段（去重、小写、去空白），并落盘。
+  void addImageSkipPath(String fragment) {
+    final norm = fragment.trim().toLowerCase();
+    if (norm.isEmpty) return;
+    final list = imageSkipPathsNotifier.value;
+    if (list.contains(norm)) return;
+    imageSkipPathsNotifier.value = <String>[...list, norm];
+    unawaited(
+      _prefs?.setStringList(_imageSkipPathsKey, imageSkipPathsNotifier.value),
+    );
+  }
+
+  /// D27：移除一条跳过片段，并落盘。
+  void removeImageSkipPath(String fragment) {
+    final norm = fragment.trim().toLowerCase();
+    final list = imageSkipPathsNotifier.value;
+    if (!list.contains(norm)) return;
+    imageSkipPathsNotifier.value = list
+        .where((e) => e != norm)
+        .toList(growable: false);
+    unawaited(
+      _prefs?.setStringList(_imageSkipPathsKey, imageSkipPathsNotifier.value),
+    );
+  }
+
+  /// D27：清空跳过名单（回到「全部同源图片分流」）。
+  void clearImageSkipPaths() {
+    if (imageSkipPathsNotifier.value.isEmpty) return;
+    imageSkipPathsNotifier.value = const <String>[];
+    unawaited(_prefs?.setStringList(_imageSkipPathsKey, const <String>[]));
+  }
 
   /// 设置同源图片分流开关（诊断页 A/B 试验用，运行时可切换）。
   ///
@@ -120,6 +184,11 @@ class WebViewAdapterSettingsService {
       gateMaxConcurrentNotifier.value = savedCap;
       WebViewBridgeGate.instance.maxConcurrent = savedCap;
     }
+    // D27：恢复同源图片分流的跳过名单（未设置过则空名单 = 全部分流）。
+    final savedSkip = prefs.getStringList(_imageSkipPathsKey);
+    if (savedSkip != null) {
+      imageSkipPathsNotifier.value = savedSkip;
+    }
   }
 
   Future<void> setEnabled(bool value) async {
@@ -182,5 +251,6 @@ class WebViewAdapterSettingsService {
     effectiveNotifier.value = false;
     imageNativeRoutingNotifier.value = true;
     gateMaxConcurrentNotifier.value = WebViewBridgeGate.defaultMaxConcurrent;
+    imageSkipPathsNotifier.value = const <String>[];
   }
 }

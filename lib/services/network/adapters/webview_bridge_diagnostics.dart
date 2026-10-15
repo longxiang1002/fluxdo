@@ -30,6 +30,21 @@ class WebViewBridgeDiagnostics {
   int apiWrite = 0;
   int other = 0;
 
+  /// D26: 按请求类别聚合的**桥内耗时**（毫秒），与上面的类别计数一一对应。
+  ///
+  /// 动机（2026-10-13 深夜重定位）：D25 已能把走桥负载按「流路径 vs 文本路径」
+  /// 拆分，但两条路径都可能同时被「图片」与「API」两类请求占用——老板真正要
+  /// 判的是「活跃刷帖时发热到底来自哪一类请求」，好决定下一步砍哪一类。这里把
+  /// 每请求的总耗时按类别累加，得到「哪一类请求吃掉了桥的大部分 CPU 时间」。
+  ///
+  /// 口径与 [totalMs] 一致（都是单请求桥内总耗时），只是多一维分类；纯整数
+  /// 累加，零采样、零新增运行时开销，不触碰任何 WebView 挂起/暂停 API。
+  int imageSameOriginMs = 0;
+  int imageOtherMs = 0;
+  int apiGetMs = 0;
+  int apiWriteMs = 0;
+  int otherMs = 0;
+
   /// 响应形态聚合：文本响应的请求数与字节量（string 路径）。
   int textResponses = 0;
   int textResponseBytes = 0;
@@ -698,12 +713,79 @@ class WebViewBridgeDiagnostics {
   /// 认为「减少走桥流请求条数」是收益最高的方向。
   static const int bridgeByteTaxStreamDominantRatio = 30;
 
+  /// D27: 因命中「分流跳过名单」而**仍走桥**的同源图片次数。
+  ///
+  /// 动机：D2 把同源图片整体分流原生，但个别路径可能被 CF 拦/变糊，需要
+  /// 逐条豁免（[WebViewAdapterSettingsService.imageSkipPaths]）。这个计数
+  /// 回答「豁免名单到底生效了几次」——若为 0 而发热仍在，说明豁免不是主因；
+  /// 若很大，说明该路径的图片仍是桥负载大头。
+  int imageRoutingSkipped = 0;
+
+  /// D26: 按请求类别聚合的总桥内耗时（毫秒），用于算各类别占比。
+  int get totalClassifiedMs =>
+      imageSameOriginMs + imageOtherMs + apiGetMs + apiWriteMs + otherMs;
+
+  /// D26: 活跃发热「按请求类别归因」——直接回答「哪一类走桥请求吃掉了桥的
+  /// 大部分 CPU 时间」，给出下一步该砍哪一类的可执行靶点。
+  ///
+  /// 动机（2026-10-13 深夜重定位）：D25 把负载拆成「流路径 vs 文本路径」，
+  /// 但那是**传输形态**维度；老板要判的是**请求类别**维度（图片 / API 读 /
+  /// 写 / 其他），两者正交。例如「流路径主导」既可能因为图片多（分流图片即可），
+  /// 也可能因为 API 返回大 JSON（分流图片没用）。本判据把每请求耗时按类别累加，
+  /// 用「耗时占比」而非「条数占比」定靶——因为发热由 CPU 时间决定，不由条数决定。
+  ///
+  /// 判据只用已聚合整数，纯派生、零采样、零新增运行时开销。返回 `null`
+  /// 表示样本不足（尚无走桥请求或耗时全为 0）。
+  String? get classTimeVerdict {
+    if (totalRequests < bridgeCostMinSamples) return null;
+    final total = totalClassifiedMs;
+    if (total <= 0) return null;
+
+    int pct(int ms) => (ms * 100 / total).round();
+    final imageMs = imageSameOriginMs + imageOtherMs;
+    final imagePct = pct(imageMs);
+    final apiGetPct = pct(apiGetMs);
+    final apiWritePct = pct(apiWriteMs);
+
+    // 单类别耗时占比过半即认定为「主导类别」，靶点明确。
+    if (imagePct >= 50) {
+      return '类别耗时归因（D26）：**图片主导**——同源图片走桥耗时 $imageMs ms'
+          '（$imagePct%），API 读 $apiGetMs ms（$apiGetPct%）、写 $apiWriteMs ms'
+          '（$apiWritePct%）。图片是活跃刷帖 CPU 时间的主要来源，'
+          '下一步优先把更多图片请求分流到原生栈（D2 方向），'
+          '或对同源图片降并发以削峰。';
+    }
+    if (apiGetPct >= 50) {
+      return '类别耗时归因（D26）：**API 读主导**——API 读请求走桥耗时 $apiGetMs ms'
+          '（$apiGetPct%），图片 $imageMs ms（$imagePct%）、写 $apiWriteMs ms'
+          '（$apiWritePct%）。发热主要来自 API 读请求的桥固定税（拼脚本 + '
+          'evaluateJavascript + 回传），分流图片收益有限，'
+          '下一步优先减少 API 读的走桥条数（只读请求改原生）或合并调用。';
+    }
+    if (apiWritePct >= 50) {
+      return '类别耗时归因（D26）：**写请求主导**——写请求走桥耗时 $apiWriteMs ms'
+          '（$apiWritePct%）。写请求必须过桥（借浏览器指纹提交），'
+          '下一步只能降单请求成本：复用 Stream bridge 避免 base64 fallback、'
+          '精简请求体序列化。';
+    }
+    return '类别耗时归因（D26）：**无单一主导类别**——图片 $imageMs ms'
+        '（$imagePct%）、API 读 $apiGetMs ms（$apiGetPct%）、'
+        '写 $apiWriteMs ms（$apiWritePct%）、其他 $otherMs ms'
+        '（${pct(otherMs)}%）。桥负载分散，'
+        '下一步按占比从高到低依次分流，或整体降并发上限削峰。';
+  }
+
   void reset() {
     imageSameOrigin = 0;
     imageOther = 0;
     apiGet = 0;
     apiWrite = 0;
     other = 0;
+    imageSameOriginMs = 0;
+    imageOtherMs = 0;
+    apiGetMs = 0;
+    apiWriteMs = 0;
+    otherMs = 0;
     textResponses = 0;
     textResponseBytes = 0;
     streamResponses = 0;
@@ -728,6 +810,7 @@ class WebViewBridgeDiagnostics {
     cookieBatchCountCalls = 0;
     cookieBatchCountNames = 0;
     imageRoutedNative = 0;
+    imageRoutingSkipped = 0;
     variantCountCacheHits = 0;
     cookieResyncPending = false;
     cookieSweepsDeferred = 0;

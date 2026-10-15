@@ -492,9 +492,16 @@ bool requestCanUseWebViewAdapter(RequestOptions options) {
     // 可回退：`skipWebViewAdapter` 仍是最高优先级的强制原生开关；
     // 若实测出现 CF 403/拦截率升高，把 [imageNativeRoutingEnabled] 置回 false
     // 即可恢复「同源图片走桥」的旧行为（一行回退，无需改调用方）。
+    // D27：若只想豁免个别路径（而非整体关分流），用诊断页的「分流跳过名单」
+    // 把该路径片段加进去即可，命中时本条回退到走桥。
     if (WebViewAdapterSettingsService.instance.imageNativeRoutingEnabled) {
-      WebViewBridgeDiagnostics.instance.imageRoutedNative++;
-      return false;
+      if (WebViewAdapterSettingsService.instance.isImageRoutingSkipped(uri)) {
+        // D27：命中豁免名单 → 仍走桥（回退到旧的「同源图片走桥」行为）。
+        WebViewBridgeDiagnostics.instance.imageRoutingSkipped++;
+      } else {
+        WebViewBridgeDiagnostics.instance.imageRoutedNative++;
+        return false;
+      }
     }
     return (method == 'GET' || method == 'HEAD') &&
         isBinaryResponse &&

@@ -60,10 +60,48 @@ class _Ios14NetworkDiagnosticsPageState
         .addListener(_changed);
     WebViewAdapterSettingsService.instance.gateMaxConcurrentNotifier
         .addListener(_changed);
+    WebViewAdapterSettingsService.instance.imageSkipPathsNotifier.addListener(
+      _changed,
+    );
   }
 
   void _changed() {
     if (mounted) setState(() {});
+  }
+
+  /// D27：弹窗输入一条「分流跳过片段」（图片 URL path 的子串，小写）。
+  ///
+  /// 用途：D2 整体分流同源图片后，若某条路径实测被 CF 拦/变糊，只把该路径
+  /// 拉回走桥，而不必整体关掉分流。片段落盘，跨重启保持。
+  Future<void> _addImageSkipPath() async {
+    final controller = TextEditingController();
+    final fragment = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('加一条分流跳过片段'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            hintText: '如 uploads/ 或 /user_avatar/',
+            helperText: '按图片 URL 的 path 做子串匹配，命中则该路径仍走桥',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text),
+            child: const Text('添加'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (fragment == null || fragment.trim().isEmpty) return;
+    WebViewAdapterSettingsService.instance.addImageSkipPath(fragment);
   }
 
   @override
@@ -73,6 +111,8 @@ class _Ios14NetworkDiagnosticsPageState
     WebViewAdapterSettingsService.instance.imageNativeRoutingNotifier
         .removeListener(_changed);
     WebViewAdapterSettingsService.instance.gateMaxConcurrentNotifier
+        .removeListener(_changed);
+    WebViewAdapterSettingsService.instance.imageSkipPathsNotifier
         .removeListener(_changed);
     super.dispose();
   }
@@ -208,6 +248,12 @@ class _Ios14NetworkDiagnosticsPageState
       'binaryBridgeResponses': s.binaryBridgeResponses,
       'binaryBridgeBytes': s.binaryBridgeBytes,
       'binaryBridgeChunks': s.binaryBridgeChunks,
+      'classTimeVerdict': s.classTimeVerdict,
+      'imageSameOriginMs': s.imageSameOriginMs,
+      'imageOtherMs': s.imageOtherMs,
+      'apiGetMs': s.apiGetMs,
+      'apiWriteMs': s.apiWriteMs,
+      'otherMs': s.otherMs,
       'gateMaxConcurrent':
           WebViewAdapterSettingsService.instance.gateMaxConcurrent,
       'avgActiveConcurrency':
@@ -236,6 +282,8 @@ class _Ios14NetworkDiagnosticsPageState
       'cookieBatchCountNames': s.cookieBatchCountNames,
       'variantCountCacheHits': s.variantCountCacheHits,
       'imageRoutedNative': s.imageRoutedNative,
+      'imageRoutingSkipped': s.imageRoutingSkipped,
+      'imageSkipPaths': WebViewAdapterSettingsService.instance.imageSkipPaths,
       'streamRawChunks': s.streamRawChunks,
       'streamCoalescedMessages': s.streamCoalescedMessages,
       'streamMessagesSaved': s.streamMessagesSaved,
@@ -353,6 +401,18 @@ class _Ios14NetworkDiagnosticsPageState
             ' / ${_bridge.binaryBridgeBytes}B'
             '（每次回调 = 一次 JS↔native 边界穿越）',
           ),
+          if (_bridge.classTimeVerdict != null)
+            Text(
+              '类别耗时归因（D26）：${_bridge.classTimeVerdict}',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          Text(
+            '各类别桥内耗时（D26）：图片同源 ${_bridge.imageSameOriginMs}ms'
+            ' / 图片其他 ${_bridge.imageOtherMs}ms'
+            ' / API 读 ${_bridge.apiGetMs}ms'
+            ' / 写 ${_bridge.apiWriteMs}ms'
+            ' / 其他 ${_bridge.otherMs}ms',
+          ),
           Text(
             '走桥请求总数：${_bridge.totalRequests}'
             '（图片同源 ${_bridge.imageSameOrigin} / 图片其他 ${_bridge.imageOther}'
@@ -364,6 +424,46 @@ class _Ios14NetworkDiagnosticsPageState
               '同源图片已分流原生直连：${_bridge.imageRoutedNative} 次'
               '（D2：这些请求不再走 JS fetch + 分块回传的桥路径）',
             ),
+          if (_bridge.imageRoutingSkipped > 0)
+            Text(
+              '同源图片按豁免名单仍走桥：${_bridge.imageRoutingSkipped} 次'
+              '（D27：命中下方跳过片段，回退到走桥旧行为）',
+            ),
+          Text(
+            '分流跳过名单（D27）：'
+            '${WebViewAdapterSettingsService.instance.imageSkipPaths.isEmpty ? "（空，全部同源图片都分流）" : WebViewAdapterSettingsService.instance.imageSkipPaths.join(" / ")}',
+          ),
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              OutlinedButton(
+                onPressed: _addImageSkipPath,
+                child: const Text('加一条跳过片段'),
+              ),
+              if (WebViewAdapterSettingsService
+                  .instance
+                  .imageSkipPaths
+                  .isNotEmpty)
+                OutlinedButton(
+                  onPressed: () => setState(
+                    () => WebViewAdapterSettingsService.instance
+                        .clearImageSkipPaths(),
+                  ),
+                  child: const Text('清空名单'),
+                ),
+              for (final fragment
+                  in WebViewAdapterSettingsService.instance.imageSkipPaths)
+                InputChip(
+                  label: Text(fragment),
+                  onDeleted: () => setState(
+                    () => WebViewAdapterSettingsService.instance
+                        .removeImageSkipPath(fragment),
+                  ),
+                ),
+            ],
+          ),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
             title: const Text('同源图片走原生直连（D2 A/B）'),
