@@ -294,7 +294,13 @@ document.close();
     _activeFetches++;
     // D13: 桥并发闸门——超出上限的请求在 Dart 侧排队，避免一起涌进单条 JS 线程。
     // 等待只发生在 Dart 的 Completer 队列上，不触碰任何 WebView 挂起/暂停 API。
-    await WebViewBridgeGate.instance.acquire();
+    // D28: 图片类走桥请求按 imageWeight 占槽位——它响应体大、分块回调多、
+    // 在飞时间长，给它更高权重可让「同时在飞的大图数」自然下降，削平
+    // 活跃滚动期的 CPU 峰值（仍是纯 Dart 侧排队，不阻塞 JS）。
+    final gateWeight = _isImageRequest(options)
+        ? WebViewBridgeGate.imageWeight
+        : 1;
+    await WebViewBridgeGate.instance.acquire(weight: gateWeight);
     // D12: 活跃期并发/耗时探针（只计数，不改行为）。
     WebViewBridgeProbe.instance.onRequestStart();
 
@@ -648,11 +654,20 @@ document.close();
       // D12: 记录本次在飞时长并收敛并发计数。
       WebViewBridgeProbe.instance.onRequestEnd(totalWatch.elapsed);
       // D13: 释放桥名额（必须在 onRequestEnd 之后，保证在飞时长含排队时间）。
-      WebViewBridgeGate.instance.release();
+      // D28: 权重必须与 acquire 时一致，否则槽位计数漂移。
+      WebViewBridgeGate.instance.release(weight: gateWeight);
       if (_activeFetches == 0 && _disposeWhenIdle) {
         close(force: false);
       }
     }
+  }
+
+  /// D28: 判断这条走桥请求是否属于「图片类」——用于在并发闸门里给它更高权重。
+  ///
+  /// 只读请求元数据（`extra` 里的 resourceKind），不解析 URL、不触碰 WebView，
+  /// 因此对桥上行为零影响、零额外开销。
+  bool _isImageRequest(RequestOptions options) {
+    return options.extra[resourceKindExtraKey]?.toString() == resourceKindImage;
   }
 
   /// D1: 把「这条走桥的请求是哪一类」记进聚合计数。

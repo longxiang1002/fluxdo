@@ -68,5 +68,39 @@ void main() {
       gate.maxConcurrent = 5;
       expect(gate.maxConcurrent, 5);
     });
+
+    test('D28: 加权请求按权重占槽位，权重和不得顶穿上限', () async {
+      final gate = WebViewBridgeGate(maxConcurrent: 3);
+      // 图片（权重 2）入桥 → 占 2 个槽位。
+      await gate.acquire(weight: WebViewBridgeGate.imageWeight);
+      expect(gate.inFlight, 2);
+      expect(gate.weightedAcquires, 1);
+      // 再来一张图（权重 2）会顶穿上限 3 → 必须排队。
+      var secondDone = false;
+      final second = gate
+          .acquire(weight: WebViewBridgeGate.imageWeight)
+          .then((_) => secondDone = true);
+      expect(gate.inFlight, 2);
+      expect(gate.queuedTotal, 1);
+      // 释放第一张图 → 第二张图名额转交，并按它自己的权重计入（+2）。
+      gate.release(weight: WebViewBridgeGate.imageWeight);
+      await second;
+      expect(secondDone, isTrue);
+      expect(gate.inFlight, 2);
+      expect(gate.weightedAcquires, 2);
+      gate.release(weight: WebViewBridgeGate.imageWeight);
+      expect(gate.inFlight, 0);
+    });
+
+    test('D28: 默认权重请求行为与旧版一致（向后兼容）', () async {
+      final gate = WebViewBridgeGate(maxConcurrent: 2);
+      await gate.acquire();
+      await gate.acquire();
+      expect(gate.inFlight, 2);
+      expect(gate.weightedAcquires, 0);
+      gate.release();
+      gate.release();
+      expect(gate.inFlight, 0);
+    });
   });
 }

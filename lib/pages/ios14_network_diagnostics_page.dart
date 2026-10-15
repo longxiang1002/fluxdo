@@ -256,6 +256,8 @@ class _Ios14NetworkDiagnosticsPageState
       'otherMs': s.otherMs,
       'gateMaxConcurrent':
           WebViewAdapterSettingsService.instance.gateMaxConcurrent,
+      'gateWeightedAcquires': _gate.weightedAcquires,
+      'gateInFlight': _gate.inFlight,
       'avgActiveConcurrency':
           WebViewBridgeProbe.instance.averageActiveConcurrency,
       'activeSampledMs': WebViewBridgeProbe.instance.activeSampledMs,
@@ -592,6 +594,11 @@ class _Ios14NetworkDiagnosticsPageState
           Text(
             '累计排队：${_gate.queuedTotal} 次'
             '（这个数字就是闸门实际拦下的并发洪峰规模）',
+          ),
+          Text(
+            '图片加权入桥（D28）：${_gate.weightedAcquires} 次'
+            '（图片按权重 ${WebViewBridgeGate.imageWeight} 占槽位，'
+            '在飞数已是权重和）',
           ),
           const Text(
             '判读：累计排队明显 > 0 且平均在飞时长下降 → 限流生效，'
