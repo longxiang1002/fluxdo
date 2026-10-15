@@ -2339,3 +2339,33 @@ push `98f27565` + `483a18f1`（`APP_VERSION_SUFFIX` 017→**018**）→ **#60**�
   「类别耗时归因(D26)」+「排队耗时归因(D31)」——两者交叉即可判定靶点：
   D26 说图片主导且 D31 排队也压图片 → 图片权重/分流继续加码；D26 说 API 读主导
   → 走 D3 桥内降开销或合并调用。SS 接管内置浏览器方向下轮交替。
+
+## 2026-10-16 00:00 CST — D32 桥内耗时三段按类别归因（CI 冻结第 13 轮）
+- 前置核对：#78 `a4f8ac9c` success（Release ios14-test-78 已出）；#77/#76 success；
+  无遗留 failure、无缺 Release。Actions 仍账号级冻结：本轮 dispatch 仍 422
+  （"Actions has been disabled for this repository."），runs total 恒 78。
+- 本轮改动（D32，纯 Dart 侧计数与派生判据，不碰 WebView 挂起/暂停 API，不阻塞 JS）：
+  - `webview_bridge_diagnostics.dart`：新增 15 个按类别的三段耗时计数
+    （imageSameOrigin/imageOther/apiGet/apiWrite/other × cookie/js/browser），
+    `totalClassifiedCookieMs/JsMs/BrowserMs` 三个求和 getter，
+    `classPhaseVerdict`（判「桥内时间是纯 CPU(JS调用) / I/O 等待(等浏览器) /
+    cookie 库往返」，给出对应靶点：脚本瘦身 vs 降并发/分流 vs 边界同步降频），
+    `imageJsMs`/`imageBrowserMs` 图片类分段聚合；`reset` 同步清空。
+  - `webview_http_adapter.dart`：新增 `_recordClassPhase`（把 D17 已有的
+    cookiePrep/jsEval/browserWait 三段按请求类别累加），在文本路径与二进制流路径
+    两处 `_recordClassTime` 之后各接一次（流路径 browserWait 用 headerWatch.elapsed）。
+  - `ios14_network_diagnostics_page.dart`：桥区展示「桥内分段归因(D32)」
+    「桥内三段耗时(D32)」「图片类分段(D32)」；报告 map 加 6 个字段。
+  - `webview_bridge_coalesce_test.dart`：新增 D32 七例（三段各自主导 + 分散 +
+    图片聚合 + reset）。
+  - `ios14-test.yml`：APP_VERSION_SUFFIX 044→**045**。
+- 本地验证（CI 同款 Dart 3.12.0）：
+  - dart format（4 文件）**0 changed，exit 0** ✅（首次 1 changed 已就地格式化后复跑通过）。
+  - `flutter test` coalesce + gate 两文件 **36/36 通过** ✅（含新增 D32 七例）。
+  - `dart analyze` diagnostics 文件 5 info 经 `git stash` 对照确认**改动前即存在**
+    （非本轮引入），且不在 CI 的 changed-dart.txt 范围外新增。
+- commit `30ed8aa2`；push 成功（`f94aa80b..30ed8aa2`）；dispatch 422，无新 run 无包。
+- 下一步：老板恢复 Actions 后 dispatch 出 D19~D32 各包（045）；实机刷帖读诊断页
+  「桥内分段归因(D32)」——若 JS 调用段主导 → 继续脚本瘦身/减条数；
+  若等浏览器段主导 → 桥非 CPU 源，转降并发或分流；与 D26/D31 交叉定位靶点。
+  SS 接管内置浏览器方向下轮交替。

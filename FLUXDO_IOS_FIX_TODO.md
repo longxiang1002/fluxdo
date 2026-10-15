@@ -4,6 +4,48 @@
 > **2026-10-13 起主攻**：DoH 模式下 App 仍旧发热（症状=**活跃刷帖时**发热，非空闲）。
 
 
+## 🎯 本轮（2026-10-16 00:00 CST）— D32：桥内耗时三段按请求类别归因
+
+### CI 前置核对（强制第 0 步）
+- **#78** `a4f8ac9c` = ✅ success（Release **ios14-test-78** / 0.2.28.032 已出）。
+- **#77** `affbc514` = ✅ success；**#76** `a47bc69c` = ✅ success。
+- → 无未修复 failure、无缺 Release。
+- ⚠️ **Actions 仍账号级冻结**：本轮实测 dispatch 再返 **HTTP 422**
+  `Actions has been disabled for this repository.`；push 兜底也不触发（runs total
+  恒停在 78）。D19~D32 均已 push 但无 run，只差 CI 出包验证。
+
+### 本轮改动（D32，commit `30ed8aa2`）
+**动机（活跃负载发热主线）**：D26 回答「哪一类请求吃掉桥时间」、D31 回答
+「排队代价压在谁身上」，但都还没回答**这段时间是 CPU 还是 I/O 等待**——
+而这决定优化方向完全不同（抠脚本 vs 降并发/分流）。D17 已把单请求耗时拆成
+「cookie准备/JS调用/等浏览器」三段，只是**没按类别分开**，无法回答
+「图片类的 CPU 税 vs API 类的 CPU 税各占多少」。
+
+**改动（纯 Dart 侧计数与派生判据，不碰 WebView 挂起/暂停 API，不阻塞 JS）**：
+- `webview_bridge_diagnostics.dart`：新增 15 个按类别的三段耗时计数 +
+  3 个求和 getter + `classPhaseVerdict`（判 JS调用段/cookie准备段/等浏览器段主导，
+  各给对应靶点）+ `imageJsMs`/`imageBrowserMs`；`reset` 同步清空。
+- `webview_http_adapter.dart`：新增 `_recordClassPhase`，在文本路径与二进制流路径
+  两处 `_recordClassTime` 之后各接一次（流路径 browserWait 用 headerWatch.elapsed）。
+- `ios14_network_diagnostics_page.dart`：桥区展示「桥内分段归因(D32)」等三行；
+  报告 map 加 6 字段。
+- `webview_bridge_coalesce_test.dart`：新增 D32 七例。
+- `.github/workflows/ios14-test.yml`：APP_VERSION_SUFFIX 044→**045**。
+
+### 本地验证（CI 同款 Dart 3.12.0）
+- `dart format --set-exit-if-changed`：4 文件 **0 changed exit 0** ✅
+- 本地 Flutter `flutter test` coalesce + gate → **36/36 通过** ✅（含 D32 七例）
+- `dart analyze` diagnostics：5 info 经 stash 对照确认**改动前即存在**（非本轮引入）
+
+### CI
+push `30ed8aa2` 成功；dispatch 422（Actions 冻结），无 run 无包。
+
+### 下一步
+1. 老板网页端恢复 GitHub Actions → 重跑 dispatch 出 D19~D32 各包（0.2.28.033~045）。
+2. 实机刷帖看诊断页「桥内分段归因(D32)」：JS调用段主导→继续脚本瘦身/减条数；
+   等浏览器段主导→桥非 CPU 源，转降并发或分流；与 D26/D31 交叉定靶点。
+3. SS 接管内置浏览器方向（P1 iOS14 管道替代）与主线下轮交替推进。
+
 ## 🎯 本轮（2026-10-15 21:00 CST）— D30：加权闸门交错场景单测（活跃混合负载账本锁定）
 
 ### CI 前置核对（强制第 0 步）
