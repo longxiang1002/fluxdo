@@ -340,7 +340,12 @@ document.close();
 
       // D1: 桥开销归因。仅整数累加，不发散存储、不写日志，激活态开销可忽略。
       final bridgeStats = WebViewBridgeDiagnostics.instance;
-      _recordBridgeRequestKind(options, requestUri, method);
+      // D26: 记录本条请求的类别，供结束时把桥内耗时归到对应类别。
+      final requestClass = _recordBridgeRequestKind(
+        options,
+        requestUri,
+        method,
+      );
 
       if (prepareAppCookies) {
         // v0.4.0: 取代 RawSetCookieQueue.flush + _repair + _syncCookiesFromJar
@@ -420,6 +425,7 @@ document.close();
       if (wantsBinaryStream) {
         final response = await _fetchBinaryStreamResponse(
           options,
+          requestClass: requestClass,
           requestId: requestId,
           method: method,
           url: url,
@@ -622,6 +628,8 @@ document.close();
       bridgeStats.textResponses++;
       bridgeStats.textResponseBytes += bodyContent.length;
       bridgeStats.totalMs += totalWatch.elapsedMilliseconds;
+      // D26: 把本条文本响应的桥内耗时归到它的请求类别。
+      _recordClassTime(requestClass, totalWatch.elapsedMilliseconds);
       bridgeStats.jsEvalMs += jsEvalElapsed.inMilliseconds;
       // D5: 本次响应体走的是「平级字段」新路径，省下了旧路径的整包二次转义。
       bridgeStats.textBodyUnescaped++;
@@ -661,23 +669,45 @@ document.close();
     if (resourceKind == resourceKindImage) {
       if (WebViewAdapterSettingsService.instance.canUseWebView(requestUri)) {
         stats.imageSameOrigin++;
+        return _BridgeRequestClass.imageSameOrigin;
       } else {
         stats.imageOther++;
+        return _BridgeRequestClass.imageOther;
       }
-      return;
     }
     if (method == 'GET' || method == 'HEAD') {
       stats.apiGet++;
-      return;
+      return _BridgeRequestClass.apiGet;
     }
     if (method == 'POST' ||
         method == 'PUT' ||
         method == 'PATCH' ||
         method == 'DELETE') {
       stats.apiWrite++;
-      return;
+      return _BridgeRequestClass.apiWrite;
     }
     stats.other++;
+    return _BridgeRequestClass.other;
+  }
+
+  /// D26: 把一条走桥请求的桥内总耗时累加到它的类别上。
+  ///
+  /// 与 [_recordBridgeRequestKind] 配对：请求开始时拿到类别，结束时（文本与
+  /// 二进制流两条路径各自）把 totalMs 归到对应类别。纯整数累加，零采样。
+  void _recordClassTime(_BridgeRequestClass cls, int ms) {
+    final stats = WebViewBridgeDiagnostics.instance;
+    switch (cls) {
+      case _BridgeRequestClass.imageSameOrigin:
+        stats.imageSameOriginMs += ms;
+      case _BridgeRequestClass.imageOther:
+        stats.imageOtherMs += ms;
+      case _BridgeRequestClass.apiGet:
+        stats.apiGetMs += ms;
+      case _BridgeRequestClass.apiWrite:
+        stats.apiWriteMs += ms;
+      case _BridgeRequestClass.other:
+        stats.otherMs += ms;
+    }
   }
 
   /// D1: 请求体在桥上的传输形态归因（base64 fallback 是 D3 的优化靶点）。
@@ -706,6 +736,7 @@ document.close();
 
   Future<ResponseBody> _fetchBinaryStreamResponse(
     RequestOptions options, {
+    required _BridgeRequestClass requestClass,
     required String requestId,
     required String method,
     required String url,
@@ -925,6 +956,8 @@ document.close();
     final bridgeStats = WebViewBridgeDiagnostics.instance;
     bridgeStats.streamResponses++;
     bridgeStats.totalMs += totalWatch.elapsedMilliseconds;
+    // D26: 把本条流响应的桥内耗时归到它的请求类别。
+    _recordClassTime(requestClass, totalWatch.elapsedMilliseconds);
     bridgeStats.jsEvalMs += jsEvalElapsed.inMilliseconds;
 
     bridge.done.whenComplete(() {
@@ -1914,6 +1947,15 @@ class _RequestBodyPlan {
 enum _BodyShape { none, direct, streamBridge, base64, inlineSmall }
 
 enum _WebViewCookieMode { sync, readOnly, none }
+
+/// D26: 走桥请求的类别，用于把桥内耗时按类别归因（见 [classTimeVerdict]）。
+enum _BridgeRequestClass {
+  imageSameOrigin,
+  imageOther,
+  apiGet,
+  apiWrite,
+  other,
+}
 
 class _BinaryResponseHeaders {
   const _BinaryResponseHeaders({
