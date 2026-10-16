@@ -608,3 +608,33 @@ push `16c4b3d2` 成功（origin 已同步）；dispatch 与 push 触发均被账
 2. 实机刷帖读诊断页六件套：D35/D36（忙闲形态）+ D26（主导类别）+ D37（单请求税轻重）
    + D38（削哪条路径）+ D40（多少白付税）+ D41（白付税值不值得砍）。
 3. SS 接管内置浏览器（P1 iOS14 管道替代）方向下轮交替推进。
+
+## D42（2026-10-16 12:00 CST）— 无效负载来源：把白付税按请求类别归因（CI 冻结第 22 轮）
+### 完成
+- [x] 核对 CI：#78 `a4f8ac9c` success（Release ios14-test-78 已出）；#77/#76 success；
+      runs total 恒 78；无遗留 failure、无缺 Release。Actions 仍账号级冻结：dispatch 422。
+- [x] **D42 改动**（纯 Dart 派生判据，零采样、零新增运行时开销、零 WebView 挂起/暂停 API）：
+      动机——D40 数了无效条数、D41 换算了下界代价，但都没回答「下一步该动谁」：
+      无效请求可能是同源图片（本可分流原生栈，见 D2），也可能是 API 读/写
+      （过盾必需，只能降条数或降成本）。两类处置完全不同，必须先把白付税按类别拆开。
+      `webview_bridge_diagnostics.dart` 新增 `wastedSourceVerdict` getter——按各类条数
+      占比把无效总条数摊派到 5 个类别，取最大一类作主导来源，三档结论分别指向
+      同源图片→核对 D2 分流计数 / API 读·写→查 4xx·5xx 来源 / 分散→按 D41 判断。
+      诊断页展示「无效负载来源（D42）」+ 报告 map 加 1 字段。
+      coalesce 单测新增 D42 七例；`ios14-test.yml` 后缀 053→**054**。
+- [x] **并入 D39**（上轮遗留半成品，方向属「空闲空转」，与最新重定位不符但无害且有单测）：
+      `frame_jank_monitor.dart` 把两条常驻探针（50ms UI 心跳 + 500ms 平台 RTT）的启停
+      绑到「诊断页可见」上；`perf_diagnostics_page.dart` 显式展示探针状态；
+      新增 `test/utils/frame_jank_probe_gating_test.dart` 五例。
+- [x] 本地验证（CI 同款 Dart 3.12.0 / Flutter 3.44.0）：
+      dart format（5 文件）**0 changed，exit 0** ✅；
+      coalesce（含 D42 七例）+ frame_jank_probe_gating **73/73 通过** ✅；
+      gate + probe 回归 **33/33 通过** ✅。
+- [x] commit `cadd30df`，push 成功（`78a52172..cadd30df`）；dispatch 422，无新 run 无包。
+### 未完成
+- Actions 账号级冻结（dispatch 422），无新 run、无新包。
+### 下一步
+1. 老板恢复 GitHub Actions 后 dispatch 出 D19~D42 各包（`0.2.28.054`）。
+2. 实机刷帖读诊断页七件套：D35/D36（忙闲形态）+ D26（主导类别）+ D37（单请求税轻重）
+   + D38（削哪条路径）+ D40（多少白付税）+ D41（值不值得砍）+ D42（白付税集中在哪一类）。
+3. SS 接管内置浏览器（P1 iOS14 管道替代）方向下轮交替推进。

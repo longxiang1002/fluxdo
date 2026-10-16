@@ -2578,3 +2578,36 @@ push `98f27565` + `483a18f1`（`APP_VERSION_SUFFIX` 017→**018**）→ **#60**�
   属「空闲空转」方向，与老板最新重定位（活跃负载发热）不符，本轮仍未提交。
 - 下一步：老板恢复 Actions 后 dispatch 出 D19~D41 各包（053）；实机刷帖读诊断页
   六件套 D35/D36 + D26 + D37 + D38 + D40 + D41 定靶。SS 接管内置浏览器方向下轮交替。
+
+## 2026-10-16 12:00 CST — D42 无效负载来源（CI 冻结第 22 轮）
+- 前置核对：#78 `a4f8ac9c` success（Release ios14-test-78 已出）；#77/#76 success；
+  runs total 恒 78；无遗留 failure、无缺 Release。
+  Actions 仍账号级冻结：本轮 dispatch 仍 422（"Actions has been disabled for this repository."）。
+- 本轮改动（D42 完成 + 并入 D39，纯 Dart、零采样、零新增运行时开销，
+  不碰 WebView 挂起/暂停 API、不阻塞 JS）：
+  - 动机：D40 数了无效条数、D41 换算了下界代价，但都没回答**下一步该动谁**——
+    无效请求可能是同源图片（本可分流原生栈，见 D2），也可能是 API 读/写
+    （过盾必需，只能降条数或降成本）。两类处置完全不同，必须先把白付税按类别拆开。
+  - `webview_bridge_diagnostics.dart`：新增 `wastedSourceVerdict` getter——
+    按各类条数占比把无效总条数摊派到 5 个类别（同源图片/跨域图片/API 读/API 写/其他），
+    取最大一类作主导来源，三档结论分别指向：同源图片→核对 D2 分流开关与
+    imageRoutedNative/imageRoutingSkipped 计数；API 读/写→查 4xx/5xx 来源；
+    分散→按 D41 判断是否整体削条数。
+  - `ios14_network_diagnostics_page.dart`：展示「无效负载来源（D42）」+ 报告 map 加 1 字段。
+  - `webview_bridge_coalesce_test.dart`：新增 D42 七例。
+  - **并入 D39**（上轮遗留半成品，方向属「空闲空转」，与老板最新重定位不符，
+    但改动无害且明确减少常驻开销，有单测覆盖）：
+    `frame_jank_monitor.dart` 把两条常驻探针（50ms UI 心跳 + 500ms 平台 RTT）
+    的启停绑到「诊断页可见」上（`setDiagnosticsViewerVisible` 跨 0 边界时才动探针），
+    `start()` 里改为 `if (hasDiagnosticsViewer) _startStallProbes()`；
+    `perf_diagnostics_page.dart` 显式说明探针当前状态（避免把「未跑」误读成「无掉帧」）；
+    新增 `test/utils/frame_jank_probe_gating_test.dart` 五例。
+  - `ios14-test.yml`：APP_VERSION_SUFFIX 053→**054**。
+- 本地验证（CI 同款 Dart 3.12.0 / Flutter 3.44.0）：
+  - dart format（5 文件）**0 changed，exit 0** ✅。
+  - coalesce（含 D42 七例）+ frame_jank_probe_gating **73/73 通过** ✅；
+    gate + probe 回归 **33/33 通过** ✅。
+- commit `cadd30df`；push 成功（`78a52172..cadd30df`）；dispatch 422，无新 run 无包。
+- 下一步：老板恢复 Actions 后 dispatch 出 D19~D42 各包（054）；实机刷帖读诊断页
+  七件套 D35/D36 + D26 + D37 + D38 + D40 + D41 + D42 定靶。
+  SS 接管内置浏览器方向下轮交替。
