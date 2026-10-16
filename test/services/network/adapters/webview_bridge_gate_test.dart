@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fluxdo/services/network/adapters/webview_bridge_gate.dart';
 
@@ -110,8 +112,10 @@ void main() {
       // 图片条数，且轻量 API 在容量放得下时不被队首大图永久饿死。
       final gate = WebViewBridgeGate(maxConcurrent: 3);
       // 第一张图 + 一个 API 立即进桥占满 3 槽；第二张图 + 两个 API 排队。
-      final fImage1 = gate.acquire(weight: 2); // inFlight 2，weighted=1
-      final fApi1 = gate.acquire(weight: 1); // inFlight 3
+      // 注：fImage1 / fApi1 立即完成（未排队），此处无需 await，
+      // 保留变量名只为标明「这两条已进桥」，故显式忽略未使用告警。
+      unawaited(gate.acquire(weight: 2)); // inFlight 2，weighted=1
+      unawaited(gate.acquire(weight: 1)); // inFlight 3
       final fImage2 = gate.acquire(weight: 2); // 排队
       final fApi2 = gate.acquire(weight: 1); // 排队
       final fApi3 = gate.acquire(weight: 1); // 排队
@@ -287,6 +291,100 @@ void main() {
       // 基线已丢弃：重置后第一次采样不补记「重置前→重置后」的时间。
       gate.sampleSaturation(5000);
       expect(gate.observedMs, 0);
+      gate.resetAllForTest();
+    });
+  });
+
+  group('D43 采样密度（空白时长）自检', () {
+    test('间隔未超阈值时不计空白', () {
+      final gate = WebViewBridgeGate(maxConcurrent: 2);
+      gate.sampleSaturation(0);
+      // 间隔 200ms = 阈值，不算「超过」，不计空白。
+      gate.sampleSaturation(200);
+      expect(gate.unobservedGapMs, 0);
+      expect(gate.unobservedGapPct, 0);
+      gate.resetAllForTest();
+    });
+
+    test('间隔超阈值时整段计入空白，且不破坏总和不变式', () {
+      final gate = WebViewBridgeGate(maxConcurrent: 2);
+      gate.sampleSaturation(0);
+      // 间隔 1000ms > 200ms → 整段 1000ms 计入空白。
+      gate.sampleSaturation(1000);
+      expect(gate.unobservedGapMs, 1000);
+      expect(gate.observedMs, 1000, reason: '饱和 + 非饱和 = 观测总时长');
+      expect(gate.unobservedGapPct, 100);
+      gate.resetAllForTest();
+    });
+
+    test('空白与饱和同源：饱和期无事件时饱和占比被低估', () async {
+      final gate = WebViewBridgeGate(maxConcurrent: 2);
+      // 基线：空闸门（非饱和）。
+      gate.sampleSaturation(0);
+      // 占满 2 个槽位，然后 1000ms 内没有任何请求事件。
+      await gate.acquire(weight: 1);
+      await gate.acquire(weight: 1);
+      gate.sampleSaturation(1000);
+      // 这段被记成「非饱和」（因为采样时刻闸门已满，但归因用的是
+      // 「距上次采样这段时间」——上次采样时闸门是空的）。
+      // 这正是 D43 要暴露的偏差来源：空白占比高 → 结论不可信。
+      expect(gate.unobservedGapMs, 1000);
+      expect(gate.unobservedGapPct, 100);
+      final verdict = gate.sampleDensityVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('采样过稀'));
+      expect(verdict, contains('可能被系统性低估'));
+      gate.release(weight: 1);
+      gate.release(weight: 1);
+      gate.resetAllForTest();
+    });
+
+    test('采样密集时判为可信', () {
+      final gate = WebViewBridgeGate(maxConcurrent: 2);
+      gate.sampleSaturation(0);
+      // 每 100ms 采一次，共 10 次 → 空白 0。
+      for (var i = 1; i <= 10; i++) {
+        gate.sampleSaturation(i * 100);
+      }
+      expect(gate.unobservedGapMs, 0);
+      final verdict = gate.sampleDensityVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('采样密度**良好**'));
+      gate.resetAllForTest();
+    });
+
+    test('空白占比中等时给出谨慎解读', () {
+      final gate = WebViewBridgeGate(maxConcurrent: 2);
+      gate.sampleSaturation(0);
+      // 密集段：每 100ms 采一次，共 8 次 → 800ms 无空白。
+      for (var i = 1; i <= 8; i++) {
+        gate.sampleSaturation(i * 100);
+      }
+      // 再一段 400ms 空白 → 空白 400 / 观测 1200 ≈ 33%，落在 20~50 之间。
+      gate.sampleSaturation(1200);
+      final gapPct = gate.unobservedGapPct;
+      expect(gapPct, isNotNull);
+      expect(gapPct! >= 20 && gapPct < 50, isTrue, reason: '实际 $gapPct%');
+      final verdict = gate.sampleDensityVerdict;
+      expect(verdict, contains('采样密度**中等**'));
+      gate.resetAllForTest();
+    });
+
+    test('reset 同时清空空白计时', () {
+      final gate = WebViewBridgeGate(maxConcurrent: 2);
+      gate.sampleSaturation(0);
+      gate.sampleSaturation(1000);
+      expect(gate.unobservedGapMs, 1000);
+      gate.reset();
+      expect(gate.unobservedGapMs, 0);
+      expect(gate.unobservedGapPct, isNull);
+      gate.resetAllForTest();
+    });
+
+    test('无样本时返回 null，不冒充结论', () {
+      final gate = WebViewBridgeGate(maxConcurrent: 2);
+      expect(gate.sampleDensityVerdict, isNull);
+      expect(gate.unobservedGapPct, isNull);
       gate.resetAllForTest();
     });
   });

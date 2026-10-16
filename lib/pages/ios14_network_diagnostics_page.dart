@@ -287,6 +287,10 @@ class _Ios14NetworkDiagnosticsPageState
       'gateSaturationTimeVerdict': s.gateSaturationTimeVerdict,
       'gateSaturatedMs': _gate.saturatedMs,
       'gateUnsaturatedMs': _gate.unsaturatedMs,
+      // D43: 采样空白（无请求事件的观测时长）与采样密度自检结论——
+      // 用于判断 D33 饱和占比的可信度。
+      'gateUnobservedGapMs': _gate.unobservedGapMs,
+      'gateSampleDensityVerdict': _gate.sampleDensityVerdict,
       'gateObservedMs': _gate.observedMs,
       'gateSaturationPct': _gate.saturationPct,
       'endToEndAttributionVerdict': s.endToEndAttributionVerdict,
@@ -734,6 +738,18 @@ class _Ios14NetworkDiagnosticsPageState
             '饱和计时（D33）：饱和 ${_gate.saturatedMs}ms'
             ' / 非饱和 ${_gate.unsaturatedMs}ms'
             '（在请求进出桥时各采一次，无定时器）',
+          ),
+          // D43: 采样密度自检——D33 的饱和占比只在请求进出桥时采样，
+          // 空白时间越长，饱和占比越可能被低估，D22 的限流结论越不可信。
+          if (_gate.sampleDensityVerdict != null)
+            Text(
+              _gate.sampleDensityVerdict!,
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+          Text(
+            '采样空白（D43）：${_gate.unobservedGapMs}ms'
+            '（两次采样间隔 > ${WebViewBridgeGate.unobservedGapThresholdMs}ms 的部分；'
+            '这段没有请求事件，饱和/非饱和是外推的）',
           ),
           Text(
             '端到端桥代价归因（D34）：${_bridge.endToEndAttributionVerdict}',
