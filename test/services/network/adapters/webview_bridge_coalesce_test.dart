@@ -586,4 +586,96 @@ void main() {
       expect(stats.wastedLoadVerdict, isNull);
     });
   });
+
+  group('D41 无效负载代价', () {
+    test('无无效请求时判据为 null', () {
+      stats.apiGet = 100;
+      stats.status2xx = 100;
+      expect(stats.wastedRequests, 0);
+      expect(stats.wastedCostVerdict, isNull);
+    });
+
+    test('样本不足（< bridgeCostMinSamples）时判据为 null', () {
+      stats.apiGet = 3;
+      stats.status4xx = 3;
+      stats.textPathRequests = 3;
+      stats.textPathMs = 30;
+      expect(stats.wastedCostVerdict, isNull);
+    });
+
+    test('两条路径都有样本时取较便宜路径作保守下界', () {
+      // 文本路径 10ms/条，流路径 100ms/条 → 下界按 10ms 算。
+      stats.apiGet = 100;
+      stats.textPathRequests = 50;
+      stats.textPathMs = 500; // 10ms 均值
+      stats.streamPathRequests = 50;
+      stats.streamPathMs = 5000; // 100ms 均值
+      stats.status4xx = 30;
+      stats.totalMs = 5500;
+      final verdict = stats.wastedCostVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('D41'));
+      // 30 条 × 10ms = 300ms 下界
+      expect(verdict, contains('300ms'));
+      expect(verdict, contains('10ms'));
+    });
+
+    test('下界占桥内总耗时 >= 15% → 判为代价可观，优先砍无效条数', () {
+      stats.apiGet = 100;
+      stats.textPathRequests = 100;
+      stats.textPathMs = 1000; // 10ms 均值
+      stats.status4xx = 25; // 25 条 × 10ms = 250ms
+      stats.totalMs = 1000; // 250/1000 = 25%
+      final verdict = stats.wastedCostVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('无效负载代价可观'));
+      expect(verdict, contains('25%'));
+    });
+
+    test('下界占比 5%~15% → 判为代价中等，不是主因', () {
+      stats.apiGet = 100;
+      stats.textPathRequests = 100;
+      stats.textPathMs = 1000; // 10ms 均值
+      stats.status4xx = 10; // 100ms
+      stats.totalMs = 1000; // 10%
+      final verdict = stats.wastedCostVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('无效负载代价中等'));
+    });
+
+    test('下界占比 < 5% → 判为代价很小，转削有效负载成本', () {
+      stats.apiGet = 100;
+      stats.textPathRequests = 100;
+      stats.textPathMs = 1000; // 10ms 均值
+      stats.status4xx = 2; // 20ms
+      stats.totalMs = 1000; // 2%
+      final verdict = stats.wastedCostVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('无效负载代价很小'));
+      expect(verdict, contains('D26'));
+    });
+
+    test('只有流路径有样本时用流路径均值', () {
+      stats.apiGet = 100;
+      stats.streamPathRequests = 20;
+      stats.streamPathMs = 2000; // 100ms 均值
+      stats.status5xx = 10;
+      stats.totalMs = 2000;
+      final verdict = stats.wastedCostVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('100ms'));
+      expect(verdict, contains('1000ms'));
+    });
+
+    test('reset 后代价判据归零', () {
+      stats.apiGet = 100;
+      stats.textPathRequests = 100;
+      stats.textPathMs = 1000;
+      stats.status4xx = 25;
+      stats.totalMs = 1000;
+      expect(stats.wastedCostVerdict, isNotNull);
+      stats.reset();
+      expect(stats.wastedCostVerdict, isNull);
+    });
+  });
 }

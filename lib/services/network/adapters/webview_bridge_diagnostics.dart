@@ -1276,6 +1276,60 @@ class WebViewBridgeDiagnostics {
         '或转查桥外（DoH 出口往返、连接复用、渲染解码）。';
   }
 
+  /// D41: 活跃发热「无效负载代价」归因——回答「白付税到底白付了多少 CPU」。
+  ///
+  /// 动机（2026-10-13 深夜重定位）：D40 只数了无效**条数**，但条数不直接等于
+  /// 代价——若无效请求多为轻量文本路径，砍掉它们省不了多少；若集中在贵的流路径
+  /// （大响应体分块回传），同样条数下代价差一个量级。这里把无效请求的
+  /// **条数占比**与**桥内耗时占比**并排给出，直接回答「砍无效负载值不值得做」。
+  ///
+  /// 口径说明：状态码分桶与路径分桶是两个独立维度，无法精确交叉（同一请求
+  /// 既记状态码也记路径，但未做二维计数）。因此这里用**保守下界**：
+  /// 假设无效请求全部落在**较便宜的那条路径**（文本/流取均值较小的），
+  /// 乘上其均值即得无效负载的**最小**桥内耗时。若这个下界都已可观，
+  /// 就说明砍无效负载确实能省下可观的桥开销，不必再纠结精确交叉。
+  ///
+  /// 纯派生计算，只用已聚合整数，零采样、零新增运行时开销。样本不足返回 `null`。
+  String? get wastedCostVerdict {
+    if (totalRequests < bridgeCostMinSamples) return null;
+    final pct = wastedSharePct;
+    if (pct == null || wastedRequests == 0) return null;
+    final textAvg = textPathCostMs;
+    final streamAvg = streamPathCostMs;
+    // 取两条路径里较便宜的一条作为保守下界；只有一条有样本时就用它。
+    final double? cheaperMs;
+    if (textAvg != null && streamAvg != null) {
+      cheaperMs = textAvg < streamAvg ? textAvg : streamAvg;
+    } else {
+      cheaperMs = textAvg ?? streamAvg;
+    }
+    if (cheaperMs == null) return null;
+    final wastedMsLowerBound = (cheaperMs * wastedRequests).round();
+    final totalMsNow = totalMs;
+    final sharePct = totalMsNow <= 0
+        ? null
+        : (wastedMsLowerBound * 100 / totalMsNow).round();
+    final pctInt = pct.round();
+    final head =
+        '无效负载代价（D41）：$wastedRequests 条无效请求（占条数 $pctInt%）'
+        '按较便宜路径均值 ${cheaperMs.round()}ms 估算，'
+        '至少白付桥内 ${wastedMsLowerBound}ms'
+        '${sharePct == null ? "" : "（占桥内总耗时 $sharePct%）"}。';
+    if (sharePct != null && sharePct >= 15) {
+      return '$head **无效负载代价可观**——砍掉这些 4xx/5xx/失败请求能省下'
+          '可感知的桥内时间（且是保守下界，实际更贵）。下一步优先定位这些'
+          '无效请求的来源路径（是否 CF 拦截、是否可回退原生栈、是否可避免重试），'
+          '收益比继续微调单请求成本更直接。';
+    }
+    if (sharePct != null && sharePct >= 5) {
+      return '$head **无效负载代价中等**——值得顺手削掉，但不是活跃发热主因；'
+          '仍应优先按 D26/D37/D38 削有效负载成本。';
+    }
+    return '$head **无效负载代价很小**——即使按保守下界算，白付的桥内时间'
+        '也占比很低，砍无效条数收益有限；活跃发热应继续按 D26/D37/D38 '
+        '削有效负载成本，或转查桥外（DoH 出口往返、连接复用、渲染解码）。';
+  }
+
   void reset() {
     imageSameOrigin = 0;
     imageOther = 0;

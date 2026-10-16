@@ -267,6 +267,8 @@ class _Ios14NetworkDiagnosticsPageState
       'wastedRequests': s.wastedRequests,
       'wastedSharePct': s.wastedSharePct,
       'wastedLoadVerdict': s.wastedLoadVerdict,
+      // D41: 无效负载代价——白付税换算成桥内耗时下界与占比。
+      'wastedCostVerdict': s.wastedCostVerdict,
       'imageSameOriginMs': s.imageSameOriginMs,
       'imageOtherMs': s.imageOtherMs,
       'apiGetMs': s.apiGetMs,
@@ -518,6 +520,13 @@ class _Ios14NetworkDiagnosticsPageState
           if (_bridge.wastedLoadVerdict != null)
             Text(
               _bridge.wastedLoadVerdict!,
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+          // D41: 无效负载代价——把「白付税条数」换算成桥内耗时下界，
+          // 直接回答「砍无效负载值不值得做」。
+          if (_bridge.wastedCostVerdict != null)
+            Text(
+              _bridge.wastedCostVerdict!,
               style: const TextStyle(fontWeight: FontWeight.w600),
             ),
           if (_bridge.imageRoutedNative > 0)
