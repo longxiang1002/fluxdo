@@ -678,4 +678,67 @@ void main() {
       expect(stats.wastedCostVerdict, isNull);
     });
   });
+
+  group('D42 无效负载来源', () {
+    test('无无效请求时判据为 null', () {
+      stats.apiGet = 100;
+      stats.status2xx = 100;
+      expect(stats.wastedSourceVerdict, isNull);
+    });
+
+    test('样本不足（< bridgeCostMinSamples）时判据为 null', () {
+      stats.apiGet = 3;
+      stats.status4xx = 3;
+      expect(stats.wastedSourceVerdict, isNull);
+    });
+
+    test('无效集中在同源图片 → 指向 D2 分流，并提示核对分流计数', () {
+      stats.imageSameOrigin = 80;
+      stats.apiGet = 20;
+      stats.status4xx = 50;
+      final verdict = stats.wastedSourceVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('D42'));
+      expect(verdict, contains('同源图片'));
+      expect(verdict, contains('D2'));
+      expect(verdict, contains('imageRoutedNative'));
+    });
+
+    test('无效集中在 API 读 → 提示不能整类搬走，查状态码来源', () {
+      stats.imageSameOrigin = 10;
+      stats.apiGet = 90;
+      stats.status4xx = 60;
+      final verdict = stats.wastedSourceVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('API 读'));
+      expect(verdict, contains('过盾必需'));
+      expect(verdict, contains('D37'));
+    });
+
+    test('无效集中在 API 写 → 同样指向桥内降成本', () {
+      stats.apiWrite = 100;
+      stats.status5xx = 40;
+      final verdict = stats.wastedSourceVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('API 写'));
+    });
+
+    test('无效分散在其他类 → 无单一主导，建议按 D41 判断', () {
+      stats.other = 100;
+      stats.status4xx = 30;
+      final verdict = stats.wastedSourceVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('其他'));
+      expect(verdict, contains('D41'));
+    });
+
+    test('reset 后来源判据归零', () {
+      stats.imageSameOrigin = 80;
+      stats.apiGet = 20;
+      stats.status4xx = 50;
+      expect(stats.wastedSourceVerdict, isNotNull);
+      stats.reset();
+      expect(stats.wastedSourceVerdict, isNull);
+    });
+  });
 }

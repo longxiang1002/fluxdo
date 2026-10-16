@@ -211,6 +211,16 @@ class _PerfDiagnosticsPageState extends State<PerfDiagnosticsPage> {
             ),
             const Divider(height: 1),
             const SizedBox(height: 8),
+            // D39: 常驻探针只在有人看诊断页时运行——这里显式说明当前状态，
+            // 避免把「探针未跑」误读成「没有掉帧」。
+            Text(
+              '常驻探针(D39):'
+              '${FrameJankMonitor.isRunning && FrameJankMonitor.hasDiagnosticsViewer ? "运行中(50ms UI 心跳 + 500ms 平台 RTT)" : "未运行(监控关闭或无人查看诊断页,零周期性开销)"}',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 4),
             Text(
               '本次会话:$frames 帧,掉帧 $janks 次'
               '(${rate.toStringAsFixed(1)}%)',

@@ -434,3 +434,177 @@ push `16c4b3d2` 成功（origin 已同步）；dispatch 与 push 触发均被账
 2. 实机刷帖读诊断页「端到端桥代价归因(D34)」：压图片→继续分流原生(D2/D19)；
    压 API→合并调用/降条数(D16/D17)；均不突出→转查桥外（渲染/解码/DoH 出口）。
 3. SS 接管内置浏览器（P1 iOS14 管道替代）方向下轮交替推进。
+
+## D35（2026-10-16 03:00 CST）— 桥活跃时长占比（CI 冻结第 16 轮）
+### 完成
+- [x] 核对 CI：#78/#77/#76 success，无遗留 failure、无缺 Release；Actions 仍冻结（dispatch 422，runs 恒 78）。
+- [x] **D35 改动**（纯 Dart 计时/派生判据，零 WebView 挂起/暂停 API、不阻塞 JS）：
+      `webview_bridge_probe.dart` 新增 `idleSampledMs`/`sampledTotalMs`/
+      `activeTimeSharePct`/`activeTimeVerdict`（复用既有 1s 采样器，不新增定时器）；
+      诊断页展示 D35 判据与活跃/空闲计时 + 报告 4 字段；probe 单测新增 D35 六例；
+      `ios14-test.yml` 后缀 047→048。
+- [x] 本地验证：dart format（CI 同款 3.12.0）3 文件 0 changed exit 0；
+      flutter test probe **11/11 通过**、gate+coalesce **51/51 通过**。
+- [x] commit `bb5a6c83`，push 成功。
+### 未完成
+- Actions 账号级冻结（dispatch 422），无新 run、无新包。
+### 下一步
+1. 老板恢复 GitHub Actions 后 dispatch 出 D19~D35 各包（`0.2.28.048`）。
+2. 实机刷帖读诊断页「桥活跃时长占比（D35）」定负载形态：
+   ≥80% 持续忙→削单请求开销(D16/D17/D3)；40~80% 脉冲→削开销+图片分流(D2/D19)；
+   <40% 间歇→转查启停抖动（合并请求/拉长空闲判定窗口）。
+3. SS 接管内置浏览器（P1 iOS14 管道替代）方向下轮交替推进。
+
+## D36（2026-10-16 05:00 CST）— 流在途修正：活跃时长占比口径纠偏（CI 冻结第 17 轮）
+### 完成
+- [x] 核对 CI：#78 `a4f8ac9c` success（Release ios14-test-78 已出）；runs total 恒 78；
+      Actions 仍账号级冻结（dispatch 422 "Actions has been disabled for this repository."）。
+- [x] **D36 改动**（纯 Dart 计数/派生判据，零 WebView 挂起/暂停 API、不阻塞 JS）：
+      动机——二进制流路径的 `onRequestEnd` 在「收到响应头」时就跑了，响应体还要经
+      WebMessageChannel 分块回传很久，这段桥其实仍在工作却被记成「空闲」，使 D35
+      「桥活跃时长占比」被系统性低估，可能把「持续负载」误判为「间歇负载」指错方向。
+      `webview_bridge_probe.dart` 新增 `_streamInFlight` 计数 + `streamInFlight`
+      只读 getter + `onStreamStart()`/`onStreamEnd()`；采样器活跃判定改为
+      `_inFlight>0 || _streamInFlight>0`；`onRequestEnd` 停表条件同步加 `_streamInFlight==0`；
+      `reset`/`resetInFlightForTest` 清零计数；新增 `streamAwareVerdict` 口径说明。
+      `webview_http_adapter.dart` 流路径 `wantsBinaryStream` 分支置
+      `_bridgeStreamInFlight=true` + `onStreamStart()`，`bridge.done.whenComplete`
+      清标记 + `onStreamEnd()`。
+      诊断页展示「流在途修正（D36）」+ 报告 map 加 `streamInFlight`/`streamAwareVerdict`。
+      probe 单测新增 D36 七例；`ios14-test.yml` 后缀 048→**049**。
+- [x] 本地验证（CI 同款 Dart 3.12.0 / Flutter 3.44.0）：
+      dart format（4 文件）**0 changed，exit 0** ✅；
+      `flutter test` probe 单文件 **18/18 通过**（含 D36 七例）✅；
+      gate + coalesce 回归 **51/51 通过** ✅。
+- [x] commit `bab455e9`，push 成功（`bb5a6c83..bab455e9`）；dispatch 422，无新 run 无包。
+### 未完成
+- Actions 账号级冻结（dispatch 422），无新 run、无新包。
+### 下一步
+1. 老板恢复 GitHub Actions 后 dispatch 出 D19~D36 各包（`0.2.28.049`）。
+2. 实机刷帖读诊断页「桥活跃时长占比（D35）」+「流在途修正（D36）」：
+   ≥80% 持续忙→削单请求开销(D16/D17/D3)；40~80% 脉冲→削开销+图片分流(D2/D19)；
+   <40% 间歇→转查启停抖动（合并请求/拉长空闲判定窗口）。
+3. SS 接管内置浏览器（P1 iOS14 管道替代）方向下轮交替推进。
+
+## D37（2026-10-16 06:00 CST）— 单请求固定税：把「该不该继续削单请求成本」变成可读数字（CI 冻结第 18 轮）
+### 完成
+- [x] 核对 CI：#78 `a4f8ac9c` success（Release ios14-test-78 已出）；runs total 恒 78；
+      无遗留 failure、无缺 Release。Actions 仍账号级冻结：本轮 dispatch 仍 422
+      （"Actions has been disabled for this repository."）。
+- [x] **D37 改动**（纯 Dart 派生判据，零采样、零新增运行时开销、零 WebView 挂起/暂停 API）：
+      动机——D35/D36 回答「桥忙多久」，D26 回答「哪一类吃时间」，但都**没有把耗时
+      按请求数归一**。若单请求固定税很轻（<10ms），活跃发热就不是「单请求太贵」，
+      继续削 D16/D17/D3 收益有限，应转查桥外（DoH 出口往返 / 连接复用路径B /
+      渲染解码）；若很重（>=50ms），削单请求成本才值得继续投入。
+      `webview_bridge_diagnostics.dart` 新增 `averageBridgeCostMs`
+      （= `totalMs / totalRequests`）+ `perRequestTaxVerdict` 三档判据
+      （>=50ms 很重 / 10~50ms 中等 / <10ms 很轻，各给出下一步靶点）。
+      诊断页展示「单请求固定税（D37）」+ 报告 map 加 `perRequestTaxVerdict` /
+      `averageBridgeCostMs` 两字段。coalesce 单测新增 D37 七例；
+      `ios14-test.yml` 后缀 049→**050**。
+- [x] 本地验证（CI 同款 Dart 3.12.0 / Flutter 3.44.0）：
+      dart format（3 文件）**0 changed，exit 0** ✅；
+      `flutter test` coalesce + probe 两文件 **61/61 通过**（含 D37 七例）✅；
+      gate 回归 **15/15 通过** ✅。（`flutter analyze` 因本机 SDK 路径告警崩溃，
+      非代码问题，CI 侧「格式与静态分析」步骤为准。）
+- [x] commit `1788ee11`，push 成功（`bab455e9..1788ee11`）；dispatch 422，无新 run 无包。
+### 未完成
+- Actions 账号级冻结（dispatch 422），无新 run、无新包。
+### 下一步
+1. 老板恢复 GitHub Actions 后 dispatch 出 D19~D37 各包（`0.2.28.050`）。
+2. 实机刷帖读诊断页三件套：「桥活跃时长占比（D35/D36）」定忙闲形态、
+   「类别耗时归因（D26）」定主导类别、「单请求固定税（D37）」定是否继续削单请求：
+   - D37 很重 → 继续削单请求成本（D16/D17/D3/D10）+ 图片分流（D2/D19）；
+   - D37 中等 → 优先减少走桥条数（图片分流 D2、只读 API 改原生）；
+   - D37 很轻 → 转查桥外（DoH 出口往返、连接复用路径B、渲染解码）。
+3. SS 接管内置浏览器（P1 iOS14 管道替代）方向下轮交替推进。
+
+## D38（2026-10-16 07:00 CST）— 响应路径成本对比：把「削单请求成本该削哪条路径」变成可读数字（CI 冻结第 19 轮）
+### 完成
+- [x] 核对 CI：#78 `a4f8ac9c` success（Release ios14-test-78 已出）；runs total 恒 78；
+      无遗留 failure、无缺 Release。Actions 仍账号级冻结：本轮 dispatch 仍 422
+      （"Actions has been disabled for this repository."）。
+- [x] **D38 改动**（纯 Dart 计数/派生判据，零采样、零新增运行时开销、零 WebView 挂起/暂停 API）：
+      动机——D37 说「单请求税重不重」，但桥内两条路径实现代价天差地别：文本路径一次
+      `evaluateJavascript` 取回字符串，流路径经 WebMessageChannel 分块回传（每块一次
+      JS↔native 边界穿越）。若两者单请求成本差一个量级，「削单请求成本」的正确靶点
+      是**贵的那条路径**，而非笼统削。这是「活跃发热」最后一处未拆开的口径。
+      `webview_bridge_diagnostics.dart` 新增 `textPathMs`/`streamPathMs` +
+      `textPathRequests`/`streamPathRequests` 四个整数计数，`textPathCostMs`/
+      `streamPathCostMs` 两个均值 getter，`pathCostVerdict` 四档判据
+      （全流路径 / 全文本路径 / 流≥2×文本 / 文本≥2×流 / 量级相当，各给出下一步靶点）。
+      `webview_http_adapter.dart` 文本路径（:684 附近）与流路径（:1141 附近）各自累加
+      路径计数与耗时。诊断页展示「响应路径成本对比（D38）」+「路径拆分（D38）」；
+      报告 map 加 6 字段。coalesce 单测新增 D38 八例；`ios14-test.yml` 后缀 050→**051**。
+- [x] 本地验证（CI 同款 Dart 3.12.0 / Flutter 3.44.0）：
+      dart format（4 文件）**0 changed，exit 0** ✅；
+      `flutter test` coalesce **51/51 通过**（含 D38 八例）✅；
+      probe + gate 回归 **33/33 通过** ✅。
+- [x] commit `0502a8cb`，push 成功（`1788ee11..0502a8cb`）；dispatch 422，无新 run 无包。
+### 未完成
+- Actions 账号级冻结（dispatch 422），无新 run、无新包。
+### 下一步
+1. 老板恢复 GitHub Actions 后 dispatch 出 D19~D38 各包（`0.2.28.051`）。
+2. 实机刷帖读诊断页四件套：「桥活跃时长占比（D35/D36）」定忙闲形态、
+   「类别耗时归因（D26）」定主导类别、「单请求固定税（D37）」定是否继续削单请求、
+   「响应路径成本对比（D38）」定削哪条路径。
+3. SS 接管内置浏览器（P1 iOS14 管道替代）方向下轮交替推进。
+
+## D40（2026-10-16 09:00 CST）— 无效负载归因：把「活跃刷帖时多少走桥请求是白付税」变成可读数字（CI 冻结第 20 轮）
+### 完成
+- [x] 核对 CI：#78 `a4f8ac9c` success（Release ios14-test-78 已出）；#77/#76 success；
+      #75 failure 已被 #76 覆盖修复。runs total 恒 78；无遗留 failure、无缺 Release。
+      Actions 仍账号级冻结：本轮 dispatch 仍 422（"Actions has been disabled for this repository."）。
+- [x] **D40 改动**（纯 Dart 计数/派生判据，零采样、零新增运行时开销、零 WebView 挂起/暂停 API）：
+      动机——D26/D37/D38 把桥内成本按「类别 / 单请求 / 路径」拆到底，但都默认走桥请求
+      是**有效负载**。若活跃期有可观比例请求拿到 403/429（CF 拦）或 5xx 或传输失败，
+      它们付了满额跨桥固定税却零收益，甚至触发重试再付一遍——这是「削单请求成本」之外
+      的另一条发热路径（直接砍条数）。此前所有口径都看不见这类「无效负载」。
+      `webview_bridge_diagnostics.dart` 新增 `status2xx/3xx/4xx/5xx` + `transportFailed`
+      五个整数分桶，`wastedRequests`（4xx+5xx+失败）、`wastedSharePct` 两个 getter，
+      `wastedLoadVerdict` 三档判据（>=20% 偏高 / 5~20% 中等 / <5% 很低）。
+      `webview_http_adapter.dart` 新增 `_recordBridgeStatus`，在文本路径与流路径各记一次
+      状态码分桶；三处传输失败点（文本超时、流 JS 调用失败、流响应头超时）各计一次
+      `transportFailed`。诊断页展示「无效负载（D40）」+ 判据；报告 map 加 8 字段。
+      coalesce 单测新增 D40 七例；`ios14-test.yml` 后缀 051→**052**。
+- [x] 本地验证（CI 同款 Dart 3.12.0 / Flutter 3.44.0）：
+      dart format（6 文件）**0 changed，exit 0** ✅；
+      coalesce **58/58 通过**（含 D40 七例）✅；gate + probe 回归 **33/33 通过** ✅。
+- [x] commit `09b1a854`，push 成功（`0502a8cb..09b1a854`）；dispatch 422，无新 run 无包。
+### 未完成
+- Actions 账号级冻结（dispatch 422），无新 run、无新包。
+- 工作区另有一份**未提交的 D39 半成品**（frame_jank_monitor 探针按需启停 + 单测），
+  属「空闲空转」方向，与老板最新重定位（活跃负载发热）不符，本轮未提交，留待决定。
+### 下一步
+1. 老板恢复 GitHub Actions 后 dispatch 出 D19~D40 各包（`0.2.28.052`）。
+2. 实机刷帖读诊断页五件套：D35/D36（忙闲形态）+ D26（主导类别）+ D37（单请求税轻重）
+   + D38（削哪条路径）+ D40（多少白付税）。
+3. SS 接管内置浏览器（P1 iOS14 管道替代）方向下轮交替推进。
+
+## D41（2026-10-16 10:00 CST）— 无效负载代价：把「白付税条数」换算成桥内耗时下界（CI 冻结第 21 轮）
+### 完成
+- [x] 核对 CI：#78 `a4f8ac9c` success（Release ios14-test-78 已出）；#77/#76 success；
+      #75 failure 已被 #76 覆盖修复。runs total 恒 78；无遗留 failure、无缺 Release。
+      Actions 仍账号级冻结：本轮 dispatch 仍 422。
+- [x] **D41 改动**（纯 Dart 派生判据，零采样、零新增运行时开销、零 WebView 挂起/暂停 API）：
+      动机——D40 只数无效**条数**，但条数 ≠ 代价；无效请求若集中在贵的流路径，
+      同样条数下代价差一个量级。D41 把无效请求的条数占比与桥内耗时占比并排给出，
+      直接回答「砍无效负载值不值得做」。口径取**保守下界**：假设无效请求全落在
+      较便宜的那条路径（文本/流均值取小者）× 条数 = 无效负载最小桥内耗时。
+      `webview_bridge_diagnostics.dart` 新增 `wastedCostVerdict` getter，三档判据
+      （下界占桥内总耗时 >=15% 可观 / 5~15% 中等 / <5% 很小）。
+      诊断页展示「无效负载代价（D41）」+ 判据；报告 map 加 1 字段。
+      coalesce 单测新增 D41 八例；`ios14-test.yml` 后缀 052→**053**。
+- [x] 本地验证（CI 同款 Dart 3.12.0 / Flutter 3.44.0）：
+      dart format（5 文件）**0 changed，exit 0** ✅；
+      coalesce **66/66 通过**（含 D41 八例）✅；gate + probe 回归 **33/33 通过** ✅。
+- [x] commit `78a52172`，push 成功（`09b1a854..78a52172`）；dispatch 422，无新 run 无包。
+### 未完成
+- Actions 账号级冻结（dispatch 422），无新 run、无新包。
+- 工作区仍有未提交的 D39 半成品（frame_jank_monitor 探针按需启停 + 单测），
+  属「空闲空转」方向，与老板最新重定位不符，仍未提交。
+### 下一步
+1. 老板恢复 GitHub Actions 后 dispatch 出 D19~D41 各包（`0.2.28.053`）。
+2. 实机刷帖读诊断页六件套：D35/D36（忙闲形态）+ D26（主导类别）+ D37（单请求税轻重）
+   + D38（削哪条路径）+ D40（多少白付税）+ D41（白付税值不值得砍）。
+3. SS 接管内置浏览器（P1 iOS14 管道替代）方向下轮交替推进。

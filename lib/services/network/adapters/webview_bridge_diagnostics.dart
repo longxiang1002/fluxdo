@@ -1330,6 +1330,66 @@ class WebViewBridgeDiagnostics {
         '削有效负载成本，或转查桥外（DoH 出口往返、连接复用、渲染解码）。';
   }
 
+  /// D42: 活跃发热「无效负载来源」归因——回答「这些白付税请求到底是谁在发」。
+  ///
+  /// 动机（2026-10-13 深夜重定位）：D40 数了条数、D41 换算了下界代价，但都还没
+  /// 回答**下一步该动谁**——无效请求可能是同源图片（本可分流原生栈，见 D2），
+  /// 也可能是 API 读/写（过盾必需，只能降条数或降成本）。这两类处置完全不同：
+  /// 前者可整类搬走，后者只能在桥内省。本判据把无效条数按**类别**拆开，
+  /// 直接指出「无效负载集中在哪一类」，让下一步有靶子。
+  ///
+  /// 口径说明：类别分桶（[imageSameOrigin]/[imageOther]/[apiGet]/[apiWrite]/
+  /// [other]）与状态码分桶是两个独立维度，未做二维交叉。因此这里用**保守下界**：
+  /// 对每个类别，取「该类条数」与「无效总条数」的较小者作为该类无效条数的上界，
+  /// 再按各类条数占比把无效总条数**摊派**下去（四舍五入），摊派结果可能略偏离
+  /// 真实分布，但足以指出「无效负载主要落在哪一类」。纯派生计算，零采样、
+  /// 零新增运行时开销。样本不足或无效条数为 0 时返回 `null`。
+  String? get wastedSourceVerdict {
+    if (totalRequests < bridgeCostMinSamples) return null;
+    if (wastedRequests == 0) return null;
+    final total = totalRequests;
+    // 按各类条数占比摊派无效条数（四舍五入），保留最大的一类作为主导来源。
+    final shares = <String, int>{
+      '同源图片': (wastedRequests * imageSameOrigin / total).round(),
+      '跨域图片': (wastedRequests * imageOther / total).round(),
+      'API 读': (wastedRequests * apiGet / total).round(),
+      'API 写': (wastedRequests * apiWrite / total).round(),
+      '其他': (wastedRequests * other / total).round(),
+    };
+    var topLabel = '其他';
+    var topCount = -1;
+    for (final entry in shares.entries) {
+      if (entry.value > topCount) {
+        topCount = entry.value;
+        topLabel = entry.key;
+      }
+    }
+    final detail = shares.entries
+        .where((e) => e.value > 0)
+        .map((e) => '${e.key} ${e.value}')
+        .join(' / ');
+    final head =
+        '无效负载来源（D42）：$wastedRequests 条无效请求按类别摊派为 '
+        '${detail.isEmpty ? "（各类均不足 1 条）" : detail}；'
+        '主导来源=**$topLabel**（约 $topCount 条）。';
+    if (topLabel == '同源图片') {
+      return '$head **无效负载集中在同源图片**——这类请求本可整体分流到原生 '
+          'Dio 直连（D2 路径），若分流后 CF 拦截率不升高，就能一次性砍掉'
+          '这批白付税，收益最直接。下一步：核对 D2 分流开关状态与 '
+          'imageRoutedNative/imageRoutingSkipped 计数，确认是否已有分流、'
+          '未分流的是否被豁免名单挡住。';
+    }
+    if (topLabel == 'API 读' || topLabel == 'API 写') {
+      return '$head **无效负载集中在 $topLabel**——这类请求过盾必需，不能整类'
+          '搬走；只能降条数（去重/缓存/合并）或降单请求成本（D37/D38）。'
+          '下一步：查这类无效请求的状态码（4xx 多为 CF 拦截或鉴权失效，'
+          '应修重试/鉴权；5xx/传输失败多为出口不稳，应查 DoH 出口与连接复用）。';
+    }
+    return '$head **无效负载分散在$topLabel**——没有单一主导类别，'
+        '逐类搬走的收益有限；建议按 D41 判断是否值得整体削条数，'
+        '否则仍优先按 D26/D37/D38 削有效负载成本。';
+  }
+
   void reset() {
     imageSameOrigin = 0;
     imageOther = 0;

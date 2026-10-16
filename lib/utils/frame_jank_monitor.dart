@@ -171,11 +171,27 @@ class FrameJankMonitor {
   static bool get hasDiagnosticsViewer => _diagViewCount > 0;
 
   /// 诊断视图挂载/卸载时调用；计数归零即视为无人查看。
+  ///
+  /// D39: 除驱动「summary 全树遍历」外，本方法现在还负责按需启停
+  /// [_startStallProbes] 里的两条常驻探针（50ms UI 心跳 + 500ms 平台 RTT）——
+  /// 监控开启但无人查看诊断页时，不为诊断付任何周期性代价。
+  /// 纯 Timer 启停，不触碰任何 WebView 挂起/暂停 API，不阻塞 JS 执行。
   static void setDiagnosticsViewerVisible(bool visible) {
+    final before = _diagViewCount;
     if (visible) {
       _diagViewCount++;
     } else if (_diagViewCount > 0) {
       _diagViewCount--;
+    }
+    // D39: 可见性跨过 0 边界时才动探针，避免多个诊断视图反复挂载时抖动。
+    final wasVisible = before > 0;
+    final nowVisible = _diagViewCount > 0;
+    if (wasVisible == nowVisible) return;
+    if (!_started) return;
+    if (nowVisible) {
+      _startStallProbes();
+    } else {
+      _stopStallProbes();
     }
   }
 
@@ -286,7 +302,11 @@ class FrameJankMonitor {
     _started = true;
     sessionStart ??= DateTime.now();
     SchedulerBinding.instance.addTimingsCallback(_onTimings);
-    _startStallProbes();
+    // D39: 常驻探针只在「有人看诊断页」时才跑——监控开启但无人查看时，
+    // 不为诊断付周期性代价（见 [setDiagnosticsViewerVisible]）。
+    if (hasDiagnosticsViewer) {
+      _startStallProbes();
+    }
     // 版本指纹(异步补齐):诊断导出必须能对上代码版本,否则
     // "旧包跑出的日志被当成新修复无效"——生产排查的头号陷阱
     unawaited(
