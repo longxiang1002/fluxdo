@@ -509,4 +509,81 @@ void main() {
       expect(stats.pathCostVerdict, isNull);
     });
   });
+
+  group('D40 无效负载归因', () {
+    test('无走桥请求时，占比与判据均为 null', () {
+      expect(stats.wastedRequests, 0);
+      expect(stats.wastedSharePct, isNull);
+      expect(stats.wastedLoadVerdict, isNull);
+    });
+
+    test('无效条数 = 4xx + 5xx + 传输失败；3xx/2xx 不算', () {
+      stats.apiGet = 100;
+      stats.status2xx = 70;
+      stats.status3xx = 5;
+      stats.status4xx = 15;
+      stats.status5xx = 5;
+      stats.transportFailed = 5;
+      expect(stats.wastedRequests, 25);
+      expect(stats.totalRequests, 100);
+      expect(stats.wastedSharePct, 25);
+    });
+
+    test('样本不足（< bridgeCostMinSamples）时判据为 null', () {
+      stats.apiGet = 3;
+      stats.status4xx = 3;
+      expect(stats.wastedLoadVerdict, isNull);
+    });
+
+    test('无效占比 >= 20% → 判为无效负载偏高，优先查 4xx/5xx 来源', () {
+      stats.apiGet = 100;
+      stats.status2xx = 70;
+      stats.status4xx = 20;
+      stats.status5xx = 5;
+      stats.transportFailed = 5;
+      final verdict = stats.wastedLoadVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('D40'));
+      expect(verdict, contains('无效负载偏高'));
+      expect(verdict, contains('30%'));
+    });
+
+    test('无效占比 5%~20% → 判为无效负载中等', () {
+      stats.apiGet = 100;
+      stats.status2xx = 90;
+      stats.status4xx = 10;
+      final verdict = stats.wastedLoadVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('无效负载中等'));
+    });
+
+    test('无效占比 < 5% → 判为无效负载很低，转削有效负载成本', () {
+      stats.apiGet = 100;
+      stats.status2xx = 97;
+      stats.status4xx = 3;
+      final verdict = stats.wastedLoadVerdict;
+      expect(verdict, isNotNull);
+      expect(verdict, contains('无效负载很低'));
+      expect(verdict, contains('D26'));
+    });
+
+    test('reset 清零状态码分桶、传输失败与判据', () {
+      stats.apiGet = 27;
+      stats.status2xx = 10;
+      stats.status3xx = 2;
+      stats.status4xx = 8;
+      stats.status5xx = 3;
+      stats.transportFailed = 4;
+      expect(stats.wastedLoadVerdict, isNotNull);
+      stats.reset();
+      expect(stats.status2xx, 0);
+      expect(stats.status3xx, 0);
+      expect(stats.status4xx, 0);
+      expect(stats.status5xx, 0);
+      expect(stats.transportFailed, 0);
+      expect(stats.wastedRequests, 0);
+      expect(stats.wastedSharePct, isNull);
+      expect(stats.wastedLoadVerdict, isNull);
+    });
+  });
 }

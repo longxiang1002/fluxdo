@@ -80,6 +80,31 @@ class WebViewBridgeDiagnostics {
   int textPathRequests = 0;
   int streamPathRequests = 0;
 
+  /// D40: 走桥请求的**响应状态码分布**（按 2xx/3xx/4xx/5xx 与传输失败分桶）。
+  ///
+  /// 动机（2026-10-13 深夜重定位：活跃刷帖时发热）：D26/D37/D38 已经把桥内
+  /// 耗时按「类别 / 单请求 / 路径」拆到底，但所有判据都隐含一个前提——
+  /// **这些走桥请求都是「有效负载」**。若活跃刷帖时桥里有相当比例的请求
+  /// 拿到 403/429（CF 拦）或 5xx（服务端错误）或传输失败，那这些请求是
+  /// **纯浪费**：付了满额跨桥固定税（拼脚本 + evaluateJavascript + 回传），
+  /// 却没换回任何内容，甚至可能触发重试把同一份税再付一遍。这种「无效负载」
+  /// 是此前所有口径都看不见的发热源，也是「削单请求成本」之外的另一条路
+  /// （削掉无效请求 = 直接砍条数）。
+  ///
+  /// 口径：只记**响应状态码分桶计数**，不记 URL/正文/账户内容；纯整数累加，
+  /// 零采样、零新增运行时开销，不触碰任何 WebView 挂起/暂停 API。
+  int status2xx = 0;
+  int status3xx = 0;
+  int status4xx = 0;
+  int status5xx = 0;
+
+  /// D40: 走桥请求里**传输层失败**（无响应、超时、桥异常）的次数。
+  ///
+  /// 与 [failed] 的区别：[failed] 是桥侧捕获到的异常计数（含脚本错误），
+  /// 这里是「请求发出去了但没拿到可用响应」的口径，用于和状态码分桶一起
+  /// 回答「活跃期有多少走桥请求是白付税」。
+  int transportFailed = 0;
+
   /// D25: 二进制流响应走「WebMessageChannel 分块回传」的请求数。
   ///
   /// 动机（2026-10-13 深夜重定位）：D16/D17/D20/D21/D22 全都在回答
@@ -1204,6 +1229,53 @@ class WebViewBridgeDiagnostics {
         '而非只盯某一条路径。';
   }
 
+  /// D40: 走桥请求里「无效负载」的条数——4xx + 5xx + 传输失败。
+  ///
+  /// 「无效」= 付了满额跨桥固定税却没换回可用内容。3xx 不算（重定向本身
+  /// 是有效的中转），2xx 是正常负载。
+  int get wastedRequests => status4xx + status5xx + transportFailed;
+
+  /// D40: 无效负载占走桥请求的百分比（0~100 整数）；无样本返回 null。
+  double? get wastedSharePct {
+    if (totalRequests <= 0) return null;
+    return wastedRequests * 100 / totalRequests;
+  }
+
+  /// D40: 活跃发热「无效负载」归因——回答「活跃刷帖时有多少走桥请求是白付税」。
+  ///
+  /// 动机（2026-10-13 深夜重定位）：D26/D37/D38 把桥内成本拆到底，但都默认
+  /// 走桥请求是有效负载。若活跃期有可观比例的请求拿到 403/429/5xx 或传输失败，
+  /// 那它们付了满额固定税却零收益，甚至触发重试再付一遍——这是「削单请求成本」
+  /// 之外的另一条发热路径（直接砍条数）。本判据把这个比例变成可读数字。
+  ///
+  /// 判据只用已聚合整数，纯派生、零采样、零新增运行时开销。返回 `null`
+  /// 表示样本不足（尚无走桥请求）。
+  String? get wastedLoadVerdict {
+    if (totalRequests < bridgeCostMinSamples) return null;
+    final pct = wastedSharePct;
+    if (pct == null) return null;
+    final pctInt = pct.round();
+    final head =
+        '无效负载归因（D40）：走桥 $totalRequests 条中 $wastedRequests 条无效'
+        '（$pctInt%）——4xx $status4xx、5xx $status5xx、传输失败 $transportFailed；'
+        '另有 3xx $status3xx、2xx $status2xx。';
+    if (pctInt >= 20) {
+      return '$head **无效负载偏高**——活跃刷帖时相当一部分走桥请求付了满额'
+          '跨桥固定税却没换回内容（CF 403/429 拦截或服务端错误），'
+          '这份税纯属浪费且可能因重试翻倍。下一步优先查这些 4xx/5xx 的来源'
+          '（是否 CF 拦截、是否需回退走桥的路径），削掉无效条数比削单请求成本'
+          '收益更直接。';
+    }
+    if (pctInt >= 5) {
+      return '$head **无效负载中等**——有少量走桥请求白付税，尚不构成主因；'
+          '可顺手核对 4xx/5xx 集中的路径，但活跃发热仍应优先按 D26/D37/D38 '
+          '的靶点削有效负载成本。';
+    }
+    return '$head **无效负载很低**——走桥请求基本都换回了内容，'
+        '活跃发热不是「白付税」造成的；继续按 D26/D37/D38 削有效负载成本，'
+        '或转查桥外（DoH 出口往返、连接复用、渲染解码）。';
+  }
+
   void reset() {
     imageSameOrigin = 0;
     imageOther = 0;
@@ -1253,6 +1325,12 @@ class WebViewBridgeDiagnostics {
     streamPathMs = 0;
     textPathRequests = 0;
     streamPathRequests = 0;
+    // D40: 状态码分桶与传输失败一并清零，保证「无效占比」重置后从零起算。
+    status2xx = 0;
+    status3xx = 0;
+    status4xx = 0;
+    status5xx = 0;
+    transportFailed = 0;
     binaryBridgeResponses = 0;
     binaryBridgeBytes = 0;
     binaryBridgeChunks = 0;

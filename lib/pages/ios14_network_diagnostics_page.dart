@@ -258,6 +258,15 @@ class _Ios14NetworkDiagnosticsPageState
       'streamPathRequests': s.streamPathRequests,
       'textPathCostMs': s.textPathCostMs,
       'streamPathCostMs': s.streamPathCostMs,
+      // D40: 无效负载——走桥请求的状态码分桶与白付税占比。
+      'status2xx': s.status2xx,
+      'status3xx': s.status3xx,
+      'status4xx': s.status4xx,
+      'status5xx': s.status5xx,
+      'transportFailed': s.transportFailed,
+      'wastedRequests': s.wastedRequests,
+      'wastedSharePct': s.wastedSharePct,
+      'wastedLoadVerdict': s.wastedLoadVerdict,
       'imageSameOriginMs': s.imageSameOriginMs,
       'imageOtherMs': s.imageOtherMs,
       'apiGetMs': s.apiGetMs,
@@ -497,6 +506,20 @@ class _Ios14NetworkDiagnosticsPageState
             ' / API 读 ${_bridge.apiGet} / 写 ${_bridge.apiWrite}'
             ' / 其他 ${_bridge.other}）',
           ),
+          // D40: 无效负载——走桥请求里有多少「付了满额固定税却没换回内容」。
+          if (_bridge.totalRequests > 0)
+            Text(
+              '无效负载（D40）：${_bridge.wastedRequests} 条'
+              '（${_bridge.wastedSharePct?.toStringAsFixed(1) ?? "-"}%）'
+              '— 4xx ${_bridge.status4xx} / 5xx ${_bridge.status5xx}'
+              ' / 传输失败 ${_bridge.transportFailed}'
+              '（另有 2xx ${_bridge.status2xx} / 3xx ${_bridge.status3xx}）',
+            ),
+          if (_bridge.wastedLoadVerdict != null)
+            Text(
+              _bridge.wastedLoadVerdict!,
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
           if (_bridge.imageRoutedNative > 0)
             Text(
               '同源图片已分流原生直连：${_bridge.imageRoutedNative} 次'

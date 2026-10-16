@@ -595,6 +595,8 @@ document.close();
         onTimeout: () {
           _pendingRequests.remove(requestId);
           unawaited(_abortWebViewFetch(requestId));
+          // D40: 文本路径超时同属「白付税」，计入无效负载。
+          WebViewBridgeDiagnostics.instance.transportFailed++;
           throw DioException(
             requestOptions: options,
             error: 'WebView request timeout',
@@ -688,6 +690,9 @@ document.close();
       // 字符串），与流路径（WebMessageChannel 分块回传）成本口径分开累计。
       bridgeStats.textPathRequests++;
       bridgeStats.textPathMs += totalWatch.elapsedMilliseconds;
+      // D40: 状态码分桶——把「这条走桥请求是否换回了可用内容」记下来，
+      // 用于回答「活跃期有多少走桥请求是白付税」（403/429/5xx/失败）。
+      _recordBridgeStatus(bridgeStats, statusCode);
       // D26: 把本条文本响应的桥内耗时归到它的请求类别。
       _recordClassTime(requestClass, totalWatch.elapsedMilliseconds);
       // D32: 进一步把桥内耗时按「cookie准备 / JS调用 / 等浏览器」三段归到类别。
@@ -709,6 +714,9 @@ document.close();
       );
     } catch (_) {
       WebViewBridgeDiagnostics.instance.failed++;
+      // D40: 传输层失败（无响应/超时/桥异常）——付了固定税却没换回内容，
+      // 计入「无效负载」，与 4xx/5xx 一起回答「多少走桥请求是白付税」。
+      WebViewBridgeDiagnostics.instance.transportFailed++;
       rethrow;
     } finally {
       _activeFetches--;
@@ -1110,6 +1118,8 @@ document.close();
       jsEvalElapsed = jsEvalWatch.elapsed;
     } catch (e) {
       bridge.completeError(e);
+      // D40: 流路径的 JS 调用失败也是「付了固定税没换回内容」，计入无效负载。
+      WebViewBridgeDiagnostics.instance.transportFailed++;
       rethrow;
     }
 
@@ -1121,6 +1131,8 @@ document.close();
       timeout,
       onTimeout: () {
         unawaited(_abortWebViewFetch(requestId));
+        // D40: 流路径响应头超时同样是「白付税」，计入无效负载。
+        WebViewBridgeDiagnostics.instance.transportFailed++;
         throw DioException(
           requestOptions: options,
           error: 'WebView binary response header timeout',
@@ -1148,6 +1160,8 @@ document.close();
     // 与文本路径（evaluateJavascript 取回字符串）成本口径分开累计。
     bridgeStats.streamPathRequests++;
     bridgeStats.streamPathMs += totalWatch.elapsedMilliseconds;
+    // D40: 状态码分桶——流路径同样记，保证「无效负载占比」覆盖两条路径。
+    _recordBridgeStatus(bridgeStats, headers.statusCode);
     // D26: 把本条流响应的桥内耗时归到它的请求类别。
     _recordClassTime(requestClass, totalWatch.elapsedMilliseconds);
     // D32: 进一步把桥内耗时按「cookie准备 / JS调用 / 等浏览器」三段归到类别。
@@ -1195,6 +1209,27 @@ document.close();
       headers: headers.headers,
       statusMessage: headers.statusMessage,
     );
+  }
+
+  /// D40: 走桥响应的状态码分桶——把「这条走桥请求是否换回了可用内容」记下来。
+  ///
+  /// 动机（2026-10-13 深夜重定位：活跃刷帖时发热）：D26/D37/D38 把桥内成本
+  /// 拆到底，但都默认走桥请求是有效负载。若活跃期有可观比例的请求拿到
+  /// 403/429（CF 拦）或 5xx（服务端错误），它们付了满额跨桥固定税却零收益，
+  /// 甚至触发重试再付一遍——这是「削单请求成本」之外的另一条发热路径。
+  ///
+  /// 纯整数分桶累加，零采样、零新增运行时开销；不记 URL/正文，不触碰任何
+  /// WebView 挂起/暂停 API。
+  void _recordBridgeStatus(WebViewBridgeDiagnostics stats, int statusCode) {
+    if (statusCode >= 200 && statusCode < 300) {
+      stats.status2xx++;
+    } else if (statusCode >= 300 && statusCode < 400) {
+      stats.status3xx++;
+    } else if (statusCode >= 400 && statusCode < 500) {
+      stats.status4xx++;
+    } else if (statusCode >= 500 && statusCode < 600) {
+      stats.status5xx++;
+    }
   }
 
   /// D33: 采样闸门饱和度——把「距上次采样这段时间」记到饱和/非饱和一侧。
